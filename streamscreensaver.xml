@@ -1,1 +1,60 @@
-/usr/share/xscreensaver/config/streamscreensaver.xml
+<?xml version="1.0" encoding="ISO-8859-1"?>
+
+<screensaver name="StreamScreenSaver" _label="StreamScreenSaver">
+<!--
+    <command arg="- -root"/>
+
+    <video href="https://www.youtube.com/watch?v=o_VRQxPCB7w"/>
+
+
+    <number id="duration" type="slider" arg="- -show-time %"
+            label="Show time in seconds" _low-label="Short" _high-label="Long"
+            low="20" high="6000" default="240"
+            convert="invert"/>
+-->
+
+    <number id="showlength"
+        type="spinbutton"
+        arg="--show-time %"
+        _label="Show time in seconds"
+        low="20"
+        high="6000"
+        default="240"
+/>
+    <select id="videoaspect">
+
+        <option id="original"
+        _label="stream size"
+        arg-set="--mode original"
+        />
+        <option id="stretch"
+        _label="stretch to fit"
+        arg-set="--mode stretch"
+        />
+        <option id="zoom"
+        _label="zoom to fit"
+        arg-set="--mode zoom"
+        />
+
+    </select>
+
+<!--
+    <number id="count" type="slider" arg="- -count %"
+            _label="Count" _low-label="Few" _high-label="Many"
+            low="0" high="20" default="5"/>
+
+    <number id="ncolors" type="slider" arg="- -ncolors %"
+            _label="Number of colors" _low-label="Two" _high-label="Many"
+            low="1" high="255" default="200"/>
+
+    <boolean id="showfps" _label="Show frame rate" arg-set="- -fps"/>
+-->
+    <xscreensaver-updater/>
+
+    <_description>
+        Showing live streams.
+        More info in the readme.md of Project stream_catcher.
+
+        Written by B. van der Burg ; 2026.
+    </_description>
+</screensaver>

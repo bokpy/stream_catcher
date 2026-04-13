@@ -1,1 +1,159 @@
-/usr/libexec/xscreensaver/StreamScreenSaver
+#!/usr/bin/env python3
+# lives as /usr/libexec/xscreensaver/StreamScreenSaver
+
+import subprocess
+import os
+import random
+import time
+import psutil
+import sys
+import glob
+import json
+from time import sleep
+import argparse
+
+parser = argparse.ArgumentParser(
+	prog='StreamScreenSaver',
+	description='A xscreensaver hack to play streams as in the screensaver\nread the readme.md for more info.\n',
+	epilog='Enjoy'
+)
+
+parser.add_argument('-t', '--show-time',type=int,nargs='?',help="time in seconds a stream is shown")
+parser.add_argument('-w', '--window-id', type=str, nargs='?', help="root window id passed by the xscreensaver")
+parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a stream "original","stretch" or "zoom"')
+
+args = parser.parse_args()
+
+CONFIG_DIR=os.path.expanduser("~/.config/stream_catcher/")
+STREAMS = []
+
+# Parameter candidates
+SHOW_TIME_SECS = 12  # Time to show the stream in seconds
+START_TIMEOUT_SECS = 15  # Time to wait for a stream to start
+
+XSCREENSAVER_WINDOW=None
+if 'XSCREENSAVER_WINDOW' in os.environ:
+	XSCREENSAVER_WINDOW=os.environ['XSCREENSAVER_WINDOW']
+	print(f'{XSCREENSAVER_WINDOW=}')
+
+ACTIVE_STREAM = None
+
+def read_streams():
+	"""
+	read the stream url's from ~/.config/stream_catcher/*.json
+	a list of dict with the field 'url' in it
+	:return: appends to global STREAMS
+	:rtype: None
+	"""
+	global STREAMS
+	#print(CONFIG_DIR+'*.json')
+	filenames = glob.glob(CONFIG_DIR+'*.json')
+	print('Reading:')
+	for filename in filenames:
+		print(f'    "{filename}"')
+		with open(filename,"r") as json_data:
+			d = json.load(json_data)
+			for stream in d:
+				STREAMS.append(stream['url'])
+	print(f"Red: {len(STREAMS)} stream url's")
+	
+
+def pick_a_stream():
+	l = len(STREAMS) - 1
+	return STREAMS[random.randint(0,l)]
+	
+class StreamDisplayer:
+	def __init__(S,url,patients_secs=5):
+		print(f'StreamDisplayer("{url}")')
+		global XSCREENSAVER_WINDOW
+		S.url=url
+		S.running=False
+		S.poll = None
+		if XSCREENSAVER_WINDOW:
+			print(f'{XSCREENSAVER_WINDOW=}')
+			S.mpv_options = ["mpv","-no-audio","-really-quiet","--fullscreen","-no-stop-screensaver"]
+			S.mpv_options.append('--wid='+str(XSCREENSAVER_WINDOW))
+			S.screen_mode_options()
+			S.mpv_options.append(S.url)
+
+		else:
+			S.mpv_options=["mpv"]
+			# S.screen_mode_options()
+			# S.mpv_options.append('--fullscreen')
+			S.mpv_options.append(S.url)
+		
+		S.mpv_proc = subprocess.Popen(S.mpv_options,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+		sleep(patients_secs)
+		if S.mpv_proc.poll():
+			print(f'StreamDisplayer FAILED')
+			raise RuntimeError
+			
+		S.running=True
+		
+	def screen_mode_options(S):
+		if args.mode:
+			if args.mode == 'original':
+				return
+			if args.mode == 'stretch':
+				S.mpv_options.append("--keepaspect=no")
+				return
+			if args.mode == 'zoom':
+				S.mpv_options.append("--video-zoom=1")
+				S.mpv_options.append("--panscan=1.0")
+				return
+			S.mpv_options.append("--keepaspect=no")
+		
+	def is_running(S):
+		S.poll = S.mpv_proc.poll()
+		#print(f'{S.poll=}')
+		if S.poll:
+			S.running = False
+			return False
+		S.running = psutil.pid_exists(S.mpv_proc.pid)
+		return S.running
+	
+	def terminate(S):
+		if S.running:
+			S.mpv_proc.terminate()
+		S.running = False
+	
+	def kill(S):
+		if S.running:
+			S.mpv_proc.kill()
+		S.running = False
+		
+def main():
+	global ACTIVE_STREAM,XSCREENSAVER_WINDOW,SHOW_TIME_SECS
+	print (sys.argv)
+	
+	if args.show_time:
+		SHOW_TIME_SECS=args.show_time
+		print(f'{SHOW_TIME_SECS=}')
+	
+	read_streams()
+	
+	while True:
+		stream_url = pick_a_stream()
+		try:
+			ACTIVE_STREAM = StreamDisplayer(stream_url)
+		except RuntimeError:
+			if ACTIVE_STREAM:
+				ACTIVE_STREAM.kill()
+			continue
+		end_of_show_time=time.time() + SHOW_TIME_SECS
+		count_down=SHOW_TIME_SECS
+		sleep_time = 3
+		#print(f'{SHOW_TIME_SECS} seconds loop started:\n')
+		while (time.time() < end_of_show_time) and ACTIVE_STREAM.is_running():
+			sleep(sleep_time)
+			count_down -= sleep_time
+			#print(f'{count_down:03} runing {ACTIVE_STREAM.is_running()}',flush=True)
+		ACTIVE_STREAM.terminate()
+		
+if __name__ == '__main__':
+	try:
+		main()
+	except KeyboardInterrupt:
+		print("\nScreensaver halted.")
+		sys.exit(0)
+		
