@@ -6,20 +6,18 @@ import pyperclip
 # sudo apt-get install wl-clipboard (on Wayland)
 # to install a copy/paste mechanism.
 
-import os.path
 import re
 import time
-import requests
-from CatcherUtilities import service_call
 import json
 import argparse
+import subprocess
 
 pyperclip.init_xclip_clipboard()
 
 parser = argparse.ArgumentParser(
 	prog='ClickNcollect',
-	description="Copy video url's to the clipboard. After a test tey wil be printed or saved to --output filename/n"\
-"to use them with StreamScreenSaver put the file in the ~/.config/stream_catcher/ directory."
+	description="Copy video url's to the clipboard. After a test they wil be printed or saved to --output filename/n"\
+	            "to use them with StreamScreenSaver put the file in the ~/.config/stream_catcher/ directory.",
 	epilog='Enjoy'
 )
 
@@ -30,10 +28,11 @@ parser = argparse.ArgumentParser(
 #parser.add_argument("htmlpages",nargs='*',help="file(s) to examine.")
 parser.add_argument('-o','--output',nargs='?',help="Json file to store url's.")
 parser.parse_args()
+
 args = parser.parse_args()
 
-from icecream import ic
-ic.configureOutput(includeContext=True)
+# from icecream import ic
+# ic.configureOutput(includeContext=True)
 
 COOKIE_FILE="/home/bob/python/stream_catcher/cookies.txt"
 
@@ -48,6 +47,23 @@ m3u8_re= re.compile(r"https://.*\.m3u8",re.IGNORECASE)
 #https://outbound-production.explore.org/stream-production-127/.m3u8
 name_re = re.compile(r'"name":[^"]+"([^"]+)"')
 strip_date_re = re.compile('[_0-9]+$')
+
+def service_call(*args):
+	sub_name = args[0]
+	try:
+		info = subprocess.check_output(args, stderr=subprocess.STDOUT)
+		str_info = info.decode('utf-8')
+		return str_info
+	
+	except subprocess.CalledProcessError as sub_error:
+		print(f'Called {sub_name} Failed.')
+		print("Error:", sub_error.returncode)
+		print("Output:", sub_error.output.decode('utf-8'))
+	except subprocess.SubprocessError as e:
+		print(f'{sub_name} Failed.')
+		print(f'{args} failed')
+		print(f'subprocess.SubprocessError {e}')
+	return 1
 
 def output_file_name():
 	output_json = args.output
@@ -108,14 +124,12 @@ def add_m3u8_stream(url):
 	global URL_SET,URL_LIST,TUBE_NAME
 	if url in URL_SET:
 		return
-	ic(url)
+	print(f'Test: "{url}"')
 	if yt_dlp_check(url):
 		URL_SET.add(url)
 		name = TUBE_NAME
 		name = clean_name(name)
 		URL_LIST.append({'name': name, 'url': url})
-		return (url,TUBE_NAME)
-	return ('','')
 
 def process_clipboard(line:str)->None:
 	"""
@@ -153,7 +167,7 @@ def clean_name(name):
 	return name
 
 def monitor_clipboard(fuction):
-	print("Monitoring Linux clipboard (Ctrl+C to stop)...")
+	print("Monitoring Linux clipboard for video url's (Ctrl+C to stop)")
 	# Initialize the 'last' content so it doesn't trigger on startup
 	last_paste = pyperclip.paste()
 	
