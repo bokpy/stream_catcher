@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+import pyperclip
+# On Linux: you can run
+# sudo apt-get install xclip
+# sudo apt-get install xselect (on X11)
+# sudo apt-get install wl-clipboard (on Wayland)
+# to install a copy/paste mechanism.
+
+import os.path
+import re
+import time
+import requests
+from CatcherUtilities import service_call
+import json
+import argparse
+
+pyperclip.init_xclip_clipboard()
+
+parser = argparse.ArgumentParser(
+	prog='ClickNcollect',
+	description="Copy video url's to the clipboard. After a test tey wil be printed or saved to --output filename/n"\
+"to use them with StreamScreenSaver put the file in the ~/.config/stream_catcher/ directory."
+	epilog='Enjoy'
+)
+
+# parser.add_argument('-C', '--check'
+#                     , action='store_true'
+#                     , help="Only store the url if the stream can bee opened'"
+#                     )
+#parser.add_argument("htmlpages",nargs='*',help="file(s) to examine.")
+parser.add_argument('-o','--output',nargs='?',help="Json file to store url's.")
+parser.parse_args()
+args = parser.parse_args()
+
+from icecream import ic
+ic.configureOutput(includeContext=True)
+
+COOKIE_FILE="/home/bob/python/stream_catcher/cookies.txt"
+
+URL_SET  = set()
+URL_LIST = []
+TUBE_NAME=''
+TAKE_FIVE = 1
+
+youtube_re = re.compile(r'https://www\.youtube\.com/(?:watch|embed)[^"]+')
+m3u8_re= re.compile(r"https://.*\.m3u8",re.IGNORECASE)
+
+#https://outbound-production.explore.org/stream-production-127/.m3u8
+name_re = re.compile(r'"name":[^"]+"([^"]+)"')
+strip_date_re = re.compile('[_0-9]+$')
+
+def output_file_name():
+	output_json = args.output
+	if output_json:
+		if output_json[-5] != '.json':
+			output_json += '.json'
+		return output_json
+	return None
+
+def strip_date(text):
+	if not text:
+		return text
+	date = strip_date_re.findall(text)
+	if len(date) < 1:
+		return text
+	strip_len=len(date[0])
+	return text[:-strip_len]
+
+def yt_dlp_check(url:str)->bool:
+	"""
+	test if the stream is reachable "yt-dlp"
+	:param url: stream url to test
+	:type url: web url
+	:return: True = success False = failed
+	:rtype: bool
+	changes global TUBE_NAME
+	"""
+	global TUBE_NAME
+	TUBE_NAME = 'FAILED'
+	print(f'yt_dlp_check("{url}")')
+	stream_info = service_call( 'yt-dlp'
+	                            ,'--cookies='+COOKIE_FILE
+	                            ,'--js-runtimes'
+	                            ,'node:/usr/bin/node'
+	                            , '--print'
+	                            ,'title'
+	                            ,url)
+	if isinstance(stream_info,int):
+		return False
+	TUBE_NAME=stream_info
+	return True
+
+def add_youtube_stream(url):
+	global URL_SET,URL_LIST,TUBE_NAME
+	if url in URL_SET:
+		#TUBE_NAME=''
+		return
+	
+	if yt_dlp_check(url):
+		URL_SET.add(url)
+		name = TUBE_NAME
+		name = clean_name(name)
+		URL_LIST.append({'name': name, 'url': url})
+		print(f'found: {name} at "{url}"')
+	
+	
+def add_m3u8_stream(url):
+	global URL_SET,URL_LIST,TUBE_NAME
+	if url in URL_SET:
+		return
+	ic(url)
+	if yt_dlp_check(url):
+		URL_SET.add(url)
+		name = TUBE_NAME
+		name = clean_name(name)
+		URL_LIST.append({'name': name, 'url': url})
+		return (url,TUBE_NAME)
+	return ('','')
+
+def process_clipboard(line:str)->None:
+	"""
+	:param line: try to extract a video url's from the text in line
+	:type text: str
+	:return: an url or None
+	:rtype: str | None
+	"""
+	#global URL_SET,URL_LIST,TUBE_NAME
+	match =youtube_re.search(line)
+	if match:
+		add_youtube_stream(match.group())
+		return
+	match = m3u8_re.search(line)
+	if match:
+		add_m3u8_stream(match.group())
+	
+	
+def remove_unicode(text):
+	# Encode to ASCII, ignoring errors (Unicode characters)
+	# then decode back to a string
+	text = re.sub(r'\\u[0-9a-fA-F]{4,}', '',text)
+	#print(text)
+	text = text.encode("ascii", "ignore").decode("ascii")
+	#print(text)
+	return text
+	
+def clean_name(name):
+	if not name:
+		return "No Name"
+	name=name.strip()
+	name=remove_unicode(name)
+	name = re.sub(r'  +',' ',name)
+	name = strip_date(name)
+	return name
+
+def monitor_clipboard(fuction):
+	print("Monitoring Linux clipboard (Ctrl+C to stop)...")
+	# Initialize the 'last' content so it doesn't trigger on startup
+	last_paste = pyperclip.paste()
+	
+	try:
+		while True:
+			current_paste = pyperclip.paste()
+			wake_time = time.time() + TAKE_FIVE
+			if current_paste != last_paste:
+				fuction(current_paste)
+				last_paste = current_paste
+			while time.time() < wake_time:
+			# Sleep to prevent high CPU usage
+				time.sleep(.3)
+	except KeyboardInterrupt:
+		print("\nMonitoring stopped.")
+
+def main():
+	global URL_SET,URL_LIST
+	print(f'{args=}')
+	monitor_clipboard(process_clipboard)
+	
+	write_file=output_file_name()
+	if write_file:
+		print ( f'Write results to "{write_file }"')
+		with open(write_file, mode="w", encoding="utf-8") as json_file:
+			json.dump(URL_LIST, json_file,indent=4)
+	else:
+		
+		print(json.dumps(URL_LIST, indent=2))
+	
+	
+if __name__ == '__main__':
+	main()
+

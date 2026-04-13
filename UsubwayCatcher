@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+import pyperclip
+import os.path
+import re
+import sys
+import requests
+from CatcherUtilities import service_call
+import random
+import time
+import json
+import argparse
+
+parser = argparse.ArgumentParser(
+	prog='UsubwayCatcher',
+	description="Tries to extract Youtube video url's from html web pages.",
+	epilog='Enjoy'
+)
+
+parser.add_argument('-C', '--check'
+                    , action='store_true'
+                    , help="Only store the url if the stream can bee opened'"
+                    )
+parser.add_argument("htmlpages",nargs='*',help="file(s) to examine.")
+parser.add_argument("outfile",nargs='?',help="Json file to store url's.")
+parser.parse_args()
+args = parser.parse_args()
+
+from icecream import ic
+ic.configureOutput(includeContext=True)
+
+COOKIE_FILE="/home/bob/python/stream_catcher/cookies.txt"
+
+URL_SET  = set()
+URL_LIST = []
+TUBE_NAME=''
+
+#youtube_re = re.compile(r'https://www\.youtube[^",?]+')
+youtube_re = re.compile(r'https://www\.youtube\.com/(?:watch|embed)[^"]+')
+
+name_re = re.compile(r'"name":[^"]+"([^"]+)"')
+strip_date_re = re.compile('[_0-9]+$')
+
+def output_file_name():
+	output_json = args.outfile
+	if output_json:
+		if output_json[-5] != '.json':
+			output_json += '.json'
+		return output_json
+	return None
+
+def strip_date(text):
+	if not text:
+		return text
+	date = strip_date_re.findall(text)
+	if len(date) < 1:
+		return text
+	strip_len=len(date[0])
+	return text[:-strip_len]
+
+def read_from_file(url):
+	print (f'read file "{url}"')
+	
+	try:
+		with open(url,'r') as file:
+			page_text=file.read()
+	except Exception as e:
+		print ("TROUBLE")
+		ic(e)
+		return page_text
+	page_text=remove_unicode(page_text)
+	page_text = page_text.replace('\n','')
+	page_text = page_text.split(',')
+	return page_text
+
+def read_from_www(url):
+	print (f'Download "{url}"')
+	response = requests.get(url)
+	if response.ok:
+		page_bytes = response.content
+		text = page_bytes.decode('utf-8')
+		return text.split('\n')
+	return []
+
+def read_from_url(url):
+	if os.path.isfile(url):
+		return read_from_file(url)
+	return read_from_www(url)
+
+def yt_dlp_check(url):
+	global TUBE_NAME
+	if not args.check:
+		return True
+	print(f'yt_dlp_check("{url}","{TUBE_NAME}")')
+	stream_info = service_call( 'yt-dlp'
+	                            ,'--cookies='+COOKIE_FILE
+	                            ,'--js-runtimes'
+	                            ,'node:/usr/bin/node'
+	                            , '--print'
+	                            ,'title'
+	                            ,url)
+	if isinstance(stream_info,int):
+		return False
+	TUBE_NAME=stream_info
+	return True
+
+def add_a_stream(url):
+	global URL_SET,URL_LIST,TUBE_NAME
+	if url in URL_SET:
+		TUBE_NAME=''
+		return ('','')
+	ic(url)
+	if yt_dlp_check(url):
+		URL_SET.add(url)
+		name = TUBE_NAME
+		name = clean_name(name)
+		URL_LIST.append({'name': name, 'url': url})
+		return (url,TUBE_NAME)
+	return ('','')
+
+
+def search_for_streams(lines):
+	"""
+	:param text: text to search for stream url's
+	:type text: str
+	:return: add to global URL_SET,URL_LIST
+	:rtype: None
+	"""
+	global URL_SET,URL_LIST,TUBE_NAME
+	print(f'search_for_streams(in {len(lines)} lines)')
+	count = 0
+	#print(lines)
+	for line in lines:
+		#print(f'{line=}')
+	# "https://www.youtube-nocookie.com/embed/qD462X82MRM?controls=1&amp;autoplay=1&amp;playsinline=1&amp;rel=0&amp;disablekb=1&amp;enablejsapi=1&amp;origin=https%3A%2F%2Fwww.natuurwebcam.nl"
+		count+=1
+		streams = youtube_re.findall(line)
+		names = name_re.findall(line)
+		if names:
+			TUBE_NAME=names[0]
+			
+		for stream in streams:
+			add_a_stream(stream)
+	
+def remove_unicode(text):
+	# Encode to ASCII, ignoring errors (Unicode characters)
+	# then decode back to a string
+	text = re.sub(r'\\u[0-9a-fA-F]{4,}', '',text)
+	#print(text)
+	text = text.encode("ascii", "ignore").decode("ascii")
+	#print(text)
+	return text
+	
+def clean_name(name):
+	if not name:
+		return "No Name"
+	name=name.strip()
+	name=remove_unicode(name)
+	name = re.sub(r'  +',' ',name)
+	name = strip_date(name)
+	return name
+
+def main():
+	global URL_SET,URL_LIST
+	print(f'{args=}')
+	for htmlpage in args.htmlpages:
+		#print (f'Read from"{htmlpage}"')
+		page_text=read_from_url(htmlpage)
+		if page_text:
+			search_for_streams(page_text) # add to URL_SET,URL_LIST
+	
+	write_file=output_file_name()
+	if write_file:
+		print ( f'Write results to "{write_file }"')
+		with open(write_file, mode="w", encoding="utf-8") as json_file:
+			json.dump(URL_LIST, json_file,indent=4)
+	else:
+		
+		print(json.dumps(URL_LIST, indent=2))
+	
+if __name__ == '__main__':
+	main()
+
