@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os.path
+
 import pyperclip
 # On Linux: you can run
 # sudo apt-get install xclip
@@ -11,22 +13,30 @@ import time
 import json
 import argparse
 import subprocess
+import yt_dlp
 
 pyperclip.init_xclip_clipboard()
 
 parser = argparse.ArgumentParser(
 	prog='ClickNcollect',
-	description="Copy video url's to the clipboard. After a test they wil be printed or saved to --output filename/n"\
-	            "to use them with StreamScreenSaver put the file in the ~/.config/stream_catcher/ directory.",
+	description="Copy a video url's to the clipboard. "
+	            "After a test it is downloaded, printed or saved in --output filename as json"
+	            "to use them with StreamScreenSaver put --output file in the ~/.config/stream_catcher/ directory.",
 	epilog='Enjoy'
 )
+parser.add_argument('-D', '--download'
+                    , choices=['non','sound','audio','video','all']
+                    , default='non'
+                    , nargs='?'
+                    , help="Download streams from the clipped url"
+                    )
 
 # parser.add_argument('-C', '--check'
 #                     , action='store_true'
 #                     , help="Only store the url if the stream can bee opened'"
 #                     )
 #parser.add_argument("htmlpages",nargs='*',help="file(s) to examine.")
-parser.add_argument('-o','--output',nargs='?',help="Json file to store url's.")
+parser.add_argument('-o','--output',nargs='?',help="Json file to store url's or directory for download.")
 parser.parse_args()
 
 args = parser.parse_args()
@@ -34,14 +44,16 @@ args = parser.parse_args()
 # from icecream import ic
 # ic.configureOutput(includeContext=True)
 
-COOKIE_FILE="/home/bob/python/stream_catcher/cookies.txt"
-
 URL_SET  = set()
 URL_LIST = []
 TUBE_NAME=''
+OUTPUT_DIR=os.path.expanduser('~/download/ClickNcollect/')
 TAKE_FIVE = 1
+COOKIE_FILE=os.path.expanduser('~/.config/stream_catcher/cookies.txt')
 
 youtube_re = re.compile(r'https://www\.youtube\.com/(?:watch|embed)[^"]+')
+#https://youtu.be/tAYP3tnHNPk
+youtu_be_re = re.compile( r'https://youtu\.be/([\w-]{11})')
 m3u8_re= re.compile(r"https://.*\.m3u8",re.IGNORECASE)
 
 #https://outbound-production.explore.org/stream-production-127/.m3u8
@@ -119,7 +131,6 @@ def add_youtube_stream(url):
 		URL_LIST.append({'name': name, 'url': url})
 		print(f'found: {name} at "{url}"')
 	
-	
 def add_m3u8_stream(url):
 	global URL_SET,URL_LIST,TUBE_NAME
 	if url in URL_SET:
@@ -131,7 +142,7 @@ def add_m3u8_stream(url):
 		name = clean_name(name)
 		URL_LIST.append({'name': name, 'url': url})
 
-def process_clipboard(line:str)->None:
+def clip_url(line:str)->None:
 	"""
 	:param line: try to extract a video url's from the text in line
 	:type text: str
@@ -143,10 +154,102 @@ def process_clipboard(line:str)->None:
 	if match:
 		add_youtube_stream(match.group())
 		return
+	match = youtu_be_re.search(line)
+	if match:
+		add_youtube_stream(match.group())
+		return
 	match = m3u8_re.search(line)
 	if match:
 		add_m3u8_stream(match.group())
+
+def yt_info(url:str)->dict:
+	#https://youtu.be/40UbSAymYJg
+	ydl_opts = {
+	'skip_download': True,        # Do not download the video file
+	'quiet': True,                 # Keep the console clean
+	'no_warnings': False,          # Still show warnings if things break
+	'js_runtimes': {"node": {"path": "/usr/bin/node"}},
+	'remote_components': ['ejs:github'], # Fix the "n-challenge" issue
+	}
+	with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+		# Use download=False here as a second safety net
+		info = ydl.extract_info(url, download=False)
 	
+	# To see everything available in a readable format:
+	sanitized_info = ydl.sanitize_info(info)
+	return sanitized_info
+
+def process_download_args(ydl_opts):
+	if args.download == 'all':
+		ydl_opts['format']='bestvideo+bestaudio/best'
+		return
+	if (args.download == 'sound') or (args.download == 'audio'):
+		ydl_opts['format']='bestaudio/best'
+		return
+	if args.download == 'video':
+		ydl_opts['format']='bestvideo/best'
+		return
+	
+def yt_downloader(url):
+	global OUTPUT_DIR,COOKIE_FILE
+	# ydl_opts = {
+	# 'format': 'bestaudio/best',      # ONLY download the audio stream
+	# 'postprocessors': [{             # Convert it to a specific format
+	# 	'key': 'FFmpegExtractAudio',
+	# 	'preferredcodec': 'mp3',
+	# 	'preferredquality': '192',
+	# }],
+	# 'outtmpl': '~/Music/%(title)s.%(ext)s',
+	# }
+	print(f'yt_downloader("{url}"')
+	#info = yt_info(url)
+	ydl_opts['js_runtimes']    = {"node": {"path": "/usr/bin/node"}}
+	ydl_opts['outtmpl']        = 'downloaded_video.%(ext)s'
+#	ydl_opts['keepvideo']      = True
+	ydl_opts['split_chapters'] = True
+	ydl_opts['cookies']        = COOKIE_FILE
+	ydl_opts['outtmpl']        = {'default':f'{OUTPUT_DIR}%(title)s.%(ext)s','chapter': f'{OUTPUT_DIR}%(section_title)s.%(ext)s'}
+	
+	process_download_args(ydl_opts)
+	# if (args.download)
+	# 	ydl_opts['preferredcodec']=: 'mp3',
+	# 	'preferredquality': '192',
+	# 		: 'bestvideo+bestaudio/best'
+	#
+	
+	with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+		ydl.download([url])
+
+def m3u8_downloader(url):
+	print(f'Download: "{url}" {args.download}')
+	print(f'm3u8_downloader NOT IMPLEMENTED')
+	# ydl_opts = {
+	# 'format': 'bestvideo+bestaudio/best',
+	# 'outtmpl': 'downloaded_video.%(ext)s',
+	# }
+	#
+	# with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+	# 	ydl.download([url])
+
+def download_url(line:str)->None:
+	"""
+	:param line: try to extract a video url's from the text in line and download contents
+	:type text: str
+	:return: an url or None
+	:rtype: str | None
+	"""
+	#global URL_SET,URL_LIST,TUBE_NAME
+	match = youtube_re.search(line)
+	if match:
+		yt_downloader(match.group())
+		return
+	match = youtu_be_re.search(line)
+	if match:
+		yt_downloader(match.group())
+		return
+	match = m3u8_re.search(line)
+	if match:
+		m3u8_downloader(match.group())
 	
 def remove_unicode(text):
 	# Encode to ASCII, ignoring errors (Unicode characters)
@@ -176,6 +279,7 @@ def monitor_clipboard(fuction):
 			current_paste = pyperclip.paste()
 			wake_time = time.time() + TAKE_FIVE
 			if current_paste != last_paste:
+				print(f'clip: "{current_paste}"')
 				fuction(current_paste)
 				last_paste = current_paste
 			while time.time() < wake_time:
@@ -183,22 +287,55 @@ def monitor_clipboard(fuction):
 				time.sleep(.3)
 	except KeyboardInterrupt:
 		print("\nMonitoring stopped.")
+		
+def set_output_directory():
+	global OUTPUT_DIR
+	dir=os.path.expanduser(args.output)
+	if dir:
+		if dir[-1:] != '/':
+			dir+='/'
+		if os.path.isdir(dir):
+			OUTPUT_DIR=dir
+			return
+		if os.makedirs(dir):
+			OUTPUT_DIR=dir
+			return
+	if os.path.isdir(OUTPUT_DIR):
+		return
+	os.makedirs(OUTPUT_DIR)
 
 def main():
-	global URL_SET,URL_LIST
+	global URL_LIST,OUTPUT_DIR
 	print(f'{args=}')
-	monitor_clipboard(process_clipboard)
+	#info=yt_info("https://youtu.be/40UbSAymYJgurl")
+	# info = yt_info("https://www.youtube.com/watch?v=M-etbOAEAa8")
+	# print(json.dumps(info,indent=2))
+	# exit(0)
+	#https://youtu.be/40UbSAymYJg
+	#av_tester("https://www.youtube.com/watch?v=_YnFpVs7ook")
 	
-	write_file=output_file_name()
-	if write_file:
-		print ( f'Write results to "{write_file }"')
-		with open(write_file, mode="w", encoding="utf-8") as json_file:
-			json.dump(URL_LIST, json_file,indent=4)
-	else:
-		
-		print(json.dumps(URL_LIST, indent=2))
+	if args.download == "non":
+		monitor_clipboard(clip_url)
 	
+		write_file=output_file_name()
+		if write_file:
+			print ( f'Write results to "{write_file }"')
+			with open(write_file, mode="w", encoding="utf-8") as file:
+				json.dump(URL_LIST, file , indent=4)
+		else:
+			print(json.dumps(URL_LIST, indent=2))
+		exit(0)
 	
+	if args.download in ['sound','video','audio','all']:
+		set_output_directory()
+		if not os.path.isfile(COOKIE_FILE):
+			print (f'No "{COOKIE_FILE}" found.')
+			print (f'https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies')
+			print ('for tips on effectively exporting YouTube cookies')
+			exit(1)
+		print(f'Download to "{OUTPUT_DIR}"')
+		monitor_clipboard(download_url)
+
 if __name__ == '__main__':
 	main()
 
