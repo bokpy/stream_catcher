@@ -192,6 +192,7 @@ def process_download_args(ydl_opts):
 	
 def yt_downloader(url):
 	global OUTPUT_DIR,COOKIE_FILE
+	ydl_opts = {}
 	# ydl_opts = {
 	# 'format': 'bestaudio/best',      # ONLY download the audio stream
 	# 'postprocessors': [{             # Convert it to a specific format
