@@ -24,8 +24,11 @@ parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a st
 
 args = parser.parse_args()
 
+BROWSERS = ["chrome", "firefox", "brave", "opera", "chromium"]
 CONFIG_DIR=os.path.expanduser("~/.config/stream_catcher/")
+COOKIES_FILE=CONFIG_DIR+ 'cookies.txt'
 STREAMS = []
+LEN_STREAMS = 0
 
 # Parameter candidates
 SHOW_TIME_SECS = 12  # Time to show the stream in seconds
@@ -37,6 +40,7 @@ if 'XSCREENSAVER_WINDOW' in os.environ:
 	print(f'{XSCREENSAVER_WINDOW=}')
 
 ACTIVE_STREAM = None
+YOUTUBE_IS_NICE = True
 
 def read_streams():
 	"""
@@ -45,7 +49,7 @@ def read_streams():
 	:return: appends to global STREAMS
 	:rtype: None
 	"""
-	global STREAMS
+	global STREAMS,LEN_STREAMS
 	#print(CONFIG_DIR+'*.json')
 	filenames = glob.glob(CONFIG_DIR+'*.json')
 	print('Reading:')
@@ -55,37 +59,45 @@ def read_streams():
 			d = json.load(json_data)
 			for stream in d:
 				STREAMS.append(stream['url'])
-	print(f"Red: {len(STREAMS)} stream url's")
+	LEN_STREAMS = len(STREAMS)
+	print(f"Red: {LEN_STREAMS} stream url's")
 	
-
 def pick_a_stream():
-	l = len(STREAMS) - 1
-	return STREAMS[random.randint(0,l)]
+	global STREAMS,LEN_STREAMS,YOUTUBE_IS_NICE
+	while True:
+		stream = STREAMS[random.randint(1,LEN_STREAMS)-1]
+		if YOUTUBE_IS_NICE:
+			return stream
+		if not 'youtu' in stream:
+			return stream
 	
 class StreamDisplayer:
 	def __init__(S,url,patients_secs=5):
 		print(f'StreamDisplayer("{url}")')
-		global XSCREENSAVER_WINDOW
+		global XSCREENSAVER_WINDOW,YOUTUBE_IS_NICE
 		S.url=url
 		S.running=False
 		S.poll = None
+		S.mpv_options = ["mpv"]
 		if XSCREENSAVER_WINDOW:
 			print(f'{XSCREENSAVER_WINDOW=}')
-			S.mpv_options = ["mpv","-no-audio","-really-quiet","--fullscreen","-no-stop-screensaver"]
-			S.mpv_options.append('--wid='+str(XSCREENSAVER_WINDOW))
+			S.mpv_options += ["-no-audio","-really-quiet","--fullscreen","-no-stop-screensaver"]
+			S.mpv_options += ['--wid='+str(XSCREENSAVER_WINDOW)]
 			S.screen_mode_options()
-			S.mpv_options.append(S.url)
-
 		else:
-			S.mpv_options=["mpv"]
+			pass
 			# S.screen_mode_options()
 			# S.mpv_options.append('--fullscreen')
-			S.mpv_options.append(S.url)
+		S.cookies_chooser()
+		S.mpv_options+=[S.url]
+		print (f'{S.mpv_options=}')
 		
 		S.mpv_proc = subprocess.Popen(S.mpv_options,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
 		sleep(patients_secs)
 		if S.mpv_proc.poll():
 			print(f'StreamDisplayer FAILED')
+			if 'youtu' in S.url:
+				YOUTUBE_IS_NICE = False
 			raise RuntimeError
 			
 		S.running=True
@@ -95,13 +107,12 @@ class StreamDisplayer:
 			if args.mode == 'original':
 				return
 			if args.mode == 'stretch':
-				S.mpv_options.append("--keepaspect=no")
+				S.mpv_options += ["--keepaspect=no"]
 				return
 			if args.mode == 'zoom':
-				S.mpv_options.append("--video-zoom=1")
-				S.mpv_options.append("--panscan=1.0")
+				S.mpv_options += ["--video-zoom=1","--panscan=1.0"]
 				return
-			S.mpv_options.append("--keepaspect=no")
+			S.mpv_options += ["--keepaspect=no"]
 		
 	def is_running(S):
 		S.poll = S.mpv_proc.poll()
@@ -121,7 +132,29 @@ class StreamDisplayer:
 		if S.running:
 			S.mpv_proc.kill()
 		S.running = False
-		
+	
+	def cookies_chooser(S):
+		global COOKIES_FILE,BROWSERS
+		for browser in BROWSERS:
+			if is_process_running(browser):
+				S.mpv_options += [f"--ytdl-raw-options=cookies-from-browser={browser}"]
+				return
+		if os.path.isfile(COOKIES_FILE):
+			S.mpv_options += [f"--ytdl-raw-options=cookies={COOKIES_FILE}"]
+			
+def is_process_running(process_name):
+	"""
+	Check if there is any running process that contains the given name.
+	"""
+	for proc in psutil.process_iter(['name']):
+		try:
+			# Check if process name contains the given name string
+			if process_name.lower() in proc.info['name'].lower():
+				return True
+		except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+			pass
+	return False
+
 def main():
 	global ACTIVE_STREAM,XSCREENSAVER_WINDOW,SHOW_TIME_SECS
 	print (sys.argv)

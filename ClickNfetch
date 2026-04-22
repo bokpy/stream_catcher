@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os.path
 
 #import pyperclip
@@ -8,29 +9,83 @@ import os.path
 # sudo apt-get install wl-clipboard (on Wayland)
 # to install a copy/paste mechanism.
 
+#import errno
 import re
 import argparse
 import subprocess
 import asyncio
 import yt_dlp
+from datetime import datetime, timedelta
+import pathlib
+import shutil
+import psutil
+import sqlite3
+#import glob
+import os
 
+
+BROWSERS = ["brave", "firefox", "chrome", "opera", "chromium"]
 parser = argparse.ArgumentParser(
 	prog='ClickNfetch',
-	description="Copy a video url's to the clipboard."
-	            "And the download starts to the --output directory",
+	description="Copy a video url's to the clipboard.\n"
+	            "To start downloadimg to the --output directory",
 	            
 	epilog='Enjoy'
 )
+parser.add_argument('-V', '--verbose'
+                    , action='store_true'
+                    , help="A lot of out put from yp-ldr"
+                    )
 parser.add_argument('-D', '--download'
                     , choices=['sound','audio','video','all']
                     , default='all'
-                    , nargs='?'
-                    , help="What to download"
+                    , metavar=''
+    #                , nargs='?'
+                    , help="Download: sound, audio, video, all"
+                    )
+parser.add_argument('-f', '--format'
+                    , default='aac'
+                    , metavar=''
+#                   , nargs='?'
+                    , help="File format use ffmpeg -codecs to see all"
+                    )
+parser.add_argument('-b', '--bitrate'
+                    , type= int
+                    , metavar=''
+                    , default=192
+#                   , nargs='?'
+                    , help="Preverded bitrate"
                     )
 
-parser.add_argument('-o','--output',nargs='?',help="Directory where the downloads go")
+COOKIE_TYPES=['saved','running'] + BROWSERS
+parser.add_argument('-c', '--cookies'
+                    , choices=COOKIE_TYPES
+                    , metavar=''
+                    , default='running'
+                    #, nargs='?'
+                    ,help=f"cookies to use: {COOKIE_TYPES}"
+                    )
+
+parser.add_argument('-C', '--Cookies'
+                    , nargs='?'
+                    , metavar=''
+                    , help="full path to a txt file with Netscape cookies."
+                    )
+parser.add_argument('-u', '--username'
+                    , metavar=''
+                    , nargs='?'
+                    , help="a username for youtube."
+                    )
+parser.add_argument('-p', '--password'
+                    , metavar=''
+                    , nargs='?'
+                    , help="a password for youtube."
+                    )
+
+parser.add_argument('-o','--output',nargs='?', metavar='',help="Directory where the downloads go")
 parser.parse_args()
 args = parser.parse_args()
+
 
 CLIPPED_URLS   = set()
 DOWNLODED_TITLES = set()
@@ -40,26 +95,47 @@ OUTPUT_DIR=os.path.expanduser('~/download/ClickNfetch/')
 TAKE_FIVE = 1
 COOKIE_FILE=os.path.expanduser('~/.config/stream_catcher/cookies.txt')
 
-YT_LPR_OPTIONS={}
-YT_LPR_OPTIONS['js_runtimes']    = {"node": {"path": "/usr/bin/node"}}
-YT_LPR_OPTIONS['outtmpl']        = 'downloaded_video.%(ext)s'
-#YT_LPR_OPTIONS['keepvideo']      = True
-YT_LPR_OPTIONS['split_chapters'] = True
-YT_LPR_OPTIONS['cookies']        = COOKIE_FILE
-YT_LPR_OPTIONS['quiet']          = True
+YT_DLP_OPTIONS={}
+YT_DLP_OPTIONS['js_runtimes']    = {"node": {"path": "/usr/bin/node"}}
+YT_DLP_OPTIONS['outtmpl']        = 'downloaded_video.%(ext)s'
+#YT_DLP_OPTIONS['keepvideo']      = True
+YT_DLP_OPTIONS['split_chapters'] = True
+
+
 
 youtube_re  = re.compile(r'https://www\.youtube\.com/(?:watch|embed)[^"]+')
 youtu_be_re = re.compile( r'https://youtu\.be/([\w-]{11})')
 m3u8_re     = re.compile(r"https://.*\.m3u8",re.IGNORECASE)
+https_re    = re.compile(r"https://.*$",re.IGNORECASE)
 
 #https://outbound-production.explore.org/stream-production-127/.m3u8
 name_re = re.compile(r'"name":[^"]+"([^"]+)"')
 strip_date_re = re.compile('[_0-9]+$')
 
+def file_is_older(file_path, days=2):
+	"""
+	Returns True if the file at file_path was modified more than 'weeks' ago.
+	"""
+	path = pathlib.Path(file_path)
+	
+	if not path.exists():
+		print(f"File not found: {file_path}")
+		return False
+	
+	# Get the last modification time as a timestamp
+	# .stat().st_mtime returns the time in seconds since the epoch
+	mtime_timestamp = path.stat().st_mtime
+	mtime_datetime = datetime.fromtimestamp(mtime_timestamp)
+	
+	cutoff = datetime.now() - timedelta(days=days)
+	
+	# If the modification time is earlier than the cutoff, it's old
+	return mtime_datetime < cutoff
+
 def get_stream_url_from_clip(line:str)->str:
 	"""
 	:param line: try to extract a video url from line
-	:type text: str
+	:type line: str
 	:return: url or ''
 	:rtype: str
 	"""
@@ -72,47 +148,223 @@ def get_stream_url_from_clip(line:str)->str:
 	match = m3u8_re.search(line)
 	if match:
 		return match.group()
+	match = https_re.search(line)
+	if match:
+		return match.group()
 	return ''
 
+# set yt-dlp options according to the passed arguments
+def credential__options():
+	if args.username:
+		YT_DLP_OPTIONS['username'] = args.username
+	if args.password:
+		YT_DLP_OPTIONS['password'] = args.password
+	
+def cookie_options():
+	global YT_DLP_OPTIONS,COOKIE_FILE
+	if args.Cookies:
+		COOKIE_FILE=args.Cookies
+		if not os.path.isfile(COOKIE_FILE):
+			print (f'Cookie file "{COOKIE_FILE}" not found.')
+			exit(1)
+		YT_DLP_OPTIONS['cookies'] = COOKIE_FILE
+		return
+	cookie=args.cookies
+	if cookie == 'running' and get_a_running_browsers_cookies():
+		return
+	if cookie == 'chrome' or cookie == 'brave':
+		YT_DLP_OPTIONS['cookies-from-browser'] = cookie
+		return
+	if cookie == 'mozilla':
+		YT_DLP_OPTIONS['cookies-from-browser'] = 'firefox'
+		return
+	if cookie == 'firefox':
+		cookies,COOKIE_FILE = firefox_cookie_grab()
+		save_to_netscape_format(cookies, COOKIE_FILE)
+		YT_DLP_OPTIONS['cookies']=COOKIE_FILE
+		return
+	if os.path.isfile(COOKIE_FILE):
+		YT_DLP_OPTIONS['cookies']=COOKIE_FILE
+		return
+		
+def is_process_running(process_name):
+	"""
+	Check if there is any running process that contains the given name.
+	"""
+	for proc in psutil.process_iter(['name']):
+		try:
+			# Check if process name contains the given name string
+			if process_name.lower() in proc.info['name'].lower():
+				return True
+		except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+			pass
+	return False
+
+def get_a_running_browsers_cookies():
+	global YT_DLP_OPTIONS,BROWSERS
+	for browser in BROWSERS:
+		if is_process_running(browser):
+			YT_DLP_OPTIONS['cookies-from-browser']=browser
+			return True
+	return False
+
+def firefox_cookie_grab():
+	
+	cookie_files = system_locate("cookies.sqlite")
+	if len(cookie_files) == 0:
+		print (f'No "cookies.sqlite" file found')
+		exit(1)
+	max_cookies = 0
+	cookie_file = ''
+	cookies     = []
+	for file in cookie_files:
+		new_cookies = inspect_cookies_sqlite(file)
+		l = len(new_cookies)
+		if l > max_cookies:
+			max_cookies = l
+			cookie_file = file
+			cookies = new_cookies
+		
+	if file_is_older(cookie_file,14):
+		print(f'The file "{cookie_file}" is older than 14 days')
+		print(f'Open firefox and visit some youtube pages.')
+		print(f'Info at "https://dev.to/osovsky/6-ways-to-get-youtube-cookies-for-yt-dlp-in-2026-only-1-works-2cnb"')
+		exit(1)
+	# print (cookies)
+	# print(f"{max_cookies} cookies extracted")
+	cookie_txt_file = os.path.dirname(cookie_file)+'/cookies.txt'
+	# print(f'{cookie_txt_file=}')
+	return cookies,cookie_txt_file
+	
+def save_to_netscape_format(cookies, filename="cookies.txt"):
+	with open(filename, "w", encoding="utf-8") as f:
+		# Write the required Netscape header
+		f.write("# Netscape HTTP Cookie File\n")
+		f.write("# This file is generated by Python; edit at your own risk.\n\n")
+		
+		for domain, name, value, path, expiry_ms, secure_val in cookies:
+			# 1. Determine if subdomains are included
+			# Usually TRUE if the domain starts with a dot
+			include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
+			
+			# 2. Convert Secure flag (1 or 0 to TRUE/FALSE)
+			secure = "TRUE" if secure_val == 1 else "FALSE"
+			
+			# 3. Convert expiry from milliseconds to seconds
+			expiry_s = str(int(expiry_ms // 1000))
+			
+			# 4. Format line: Domain, Subdomains, Path, Secure, Expiry, Name, Value
+			# Use \t for tabs as per Linux standards
+			line = "\t".join([
+				domain,
+				include_subdomains,
+				path,
+				secure,
+				expiry_s,
+				name,
+				value
+			])
+			
+			f.write(line + "\n")
+
+def inspect_cookies_sqlite(db):
+	shutil.copy2(db, "tmp.sqlite")  # Copy — Firefox locks the file
+	conn = sqlite3.connect("tmp.sqlite")
+	rows = conn.execute(
+	"SELECT host, name, value, path, expiry, isSecure "
+	"FROM moz_cookies WHERE host LIKE '%youtube%' OR host LIKE '%google%'"
+	).fetchall()
+	return rows
+
+def system_locate(filename):
+	"""
+	Uses the Linux system 'locate' command for maximum speed.
+	"""
+	try:
+		# Runs 'locate filename' and captures the output
+		output = subprocess.check_output(["locate",'-b','-r', filename+'$' ])
+		result = output.decode("utf-8")
+		return result.strip().split("\n")
+	except subprocess.CalledProcessError:
+		# Return empty list if nothing is found
+		return []
+def find_cookies_sqlite():
+	"""
+	Searches the home directory for Firefox cookies.sqlite files.
+	Returns a list of absolute paths.
+	"""
+	# Get the absolute path to the user's home directory
+	home = pathlib.Path.home()
+	
+	# Define the search pattern
+	# .mozilla/firefox/ is the standard location for Firefox profiles
+	search_path = home / ".mozilla" / "firefox"
+	
+	# Check if the path exists first to avoid errors
+	if not search_path.exists():
+		print("Firefox directory not found.")
+		return []
+
+	# Use glob to find all cookies.sqlite files recursively within the firefox dir
+	# '**' means search through all subdirectories (the profile folders)
+	cookie_files = list(search_path.glob("**/cookies.sqlite"))
+	return [str(path) for path in cookie_files]
+
 def download_options():
-	global YT_LPR_OPTIONS
+	global YT_DLP_OPTIONS
+	if args.verbose:
+		YT_DLP_OPTIONS['verbose']=True
+	else:
+		YT_DLP_OPTIONS['quiet']=True
+		
 	if args.download == 'all':
-		YT_LPR_OPTIONS['format']='bestvideo+bestaudio/best'
+		YT_DLP_OPTIONS['format']='bestvideo+bestaudio/best'
 		return
 	if (args.download == 'sound') or (args.download == 'audio'):
-		YT_LPR_OPTIONS['format']='bestaudio/best'
+		YT_DLP_OPTIONS['format']='bestaudio/best'
 		return
 	if args.download == 'video':
-		YT_LPR_OPTIONS['format']='bestvideo/best'
+		YT_DLP_OPTIONS['format']='bestvideo/best'
 		return
-	YT_LPR_OPTIONS['format']='bestvideo+bestaudio/best'
+	YT_DLP_OPTIONS['format']='bestvideo+bestaudio/best'
 	
-def set_output_directory():
-	global OUTPUT_DIR
-	print (f'set_output_directory() {args.output}')
-	if not args.output:
-		if os.path.isdir(OUTPUT_DIR):
-			return
-		if os.makedirs(OUTPUT_DIR):
-			return
-	OUTPUT_DIR=os.path.expanduser(args.output)
-	if OUTPUT_DIR[-1:] != '/':
-		OUTPUT_DIR+='/'
-	if os.path.isdir(OUTPUT_DIR):
+def format_options():
+	global YT_DLP_OPTIONS
+	codec=args.format
+	if not codec:
 		return
-	if os.makedirs(OUTPUT_DIR):
-		return
+	YT_DLP_OPTIONS['postprocessors']=[{             # Convert it to a specific codec
+		'key': 'FFmpegExtractAudio',
+		'preferredcodec': codec,
+		'preferredquality': str(args.bitrate),
+	}]
+	
+# def set_output_directory():
+# 	global OUTPUT_DIR
+# 	print (f'set_output_directory() {args.output}')
+# 	if not args.output:
+# 		if os.path.isdir(OUTPUT_DIR):
+# 			return
+# 		if os.makedirs(OUTPUT_DIR):
+# 			return
+# 	OUTPUT_DIR=os.path.expanduser(args.output)
+# 	if OUTPUT_DIR[-1:] != '/':
+# 		OUTPUT_DIR+='/'
+# 	if os.path.isdir(OUTPUT_DIR):
+# 		return
+# 	if os.makedirs(OUTPUT_DIR):
+# 		return
 
 ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ###
 
 # This requires 'xclip' or 'xsel' on Linux
-def get_clipboard():
-	return subprocess.check_output(['xclip', '-selection', 'clipboard', '-o']).decode('utf-8').strip()
+# def get_clipboard():
+# 	return subprocess.check_output(['xclip', '-selection', 'clipboard', '-o']).decode('utf-8').strip()
 
-def download_sync(url):
-	global YT_LPR_OPTIONS
-	with yt_dlp.YoutubeDL(YT_LPR_OPTIONS) as ydl:
-		ydl.download([url])
+# def download_sync(url):
+# 	global YT_DLP_OPTIONS
+# 	with yt_dlp.YoutubeDL(YT_DLP_OPTIONS) as ydl:
+# 		ydl.download([url])
 
 def m3u8_downloader(url):
 	print(f'Download: "{url}" {args.download}')
@@ -130,8 +382,14 @@ def set_output_directory():
 		OUTPUT_DIR+='/'
 	if os.path.isdir(OUTPUT_DIR):
 		return
-	if os.makedirs(OUTPUT_DIR):
-		return
+	try:
+		os.makedirs(OUTPUT_DIR)
+	except OSError as e:
+		print (f'makedirs failed: "{OUTPUT_DIR}" {e.strerror}.')
+		exit(e.errno)
+	
+def show_yt_dlp_options():
+	print(json.dumps(YT_DLP_OPTIONS,indent=2))
 
 ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ### Eeij ###
 
@@ -140,10 +398,24 @@ def get_clipboard():
 	return subprocess.check_output(['xclip', '-selection', 'clipboard', '-o']).decode('utf-8').strip()
 
 def download_sync(url):
-	global YT_LPR_OPTIONS
-	with yt_dlp.YoutubeDL(YT_LPR_OPTIONS) as ydl:
-		ydl.download([url])
-
+	print(f'download_sync("{url}")')
+	global YT_DLP_OPTIONS
+	# maybee catch ERROR: unable to write data: [Errno 28] No space left on device
+	with yt_dlp.YoutubeDL(YT_DLP_OPTIONS) as ydl:
+		print (f'{YT_DLP_OPTIONS['DownloadError']=}')
+		if YT_DLP_OPTIONS['DownloadError']:
+			try:
+				ydl.download([url])
+			except  yt_dlp.utils.DownloadError as e:
+				print (f'ydl.download("{url}" failed with {e}')
+			return
+		else:
+			print(f'\n--------> else')
+			ret_code = ydl.download([url])
+			print(f'\n-------->{ret_code=}')
+			if ret_code:
+				print(f'ydl.download("{url}" got error {ret_code}')
+			
 async def worker(queue):
 	"""Consumes URLs from the queue and downloads them."""
 	while True:
@@ -188,18 +460,26 @@ async def main():
 	queue = asyncio.Queue()
 	
 	# Start the worker and the scanner as background tasks
-	worker_task  = asyncio.create_task(worker(queue))
+	#worker_task = asyncio.create_task(worker(queue))
+	_ = asyncio.create_task(worker(queue))
 	scanner_task = asyncio.create_task(clipboard_scanner(queue))
 	
 	# Keep the script running
 	await asyncio.gather(scanner_task)
-
+	
 if __name__ == "__main__":
+	print(args)
+	# save_to_netscape_format(BRAVE_COOKIES)
+	# exit(0)
 	set_output_directory()
 	print ( f'{args.download} downloads goto: "{OUTPUT_DIR}"')
-	YT_LPR_OPTIONS['outtmpl'] =\
+	YT_DLP_OPTIONS['outtmpl'] =\
 		{'default': f'{OUTPUT_DIR}%(title)s.%(ext)s','chapter': f'{OUTPUT_DIR}%(section_title)s.%(ext)s'}
+	YT_DLP_OPTIONS['DownloadError'] = False
 	download_options() # all, audio, sound or video
+	format_options()
+	cookie_options()
+	show_yt_dlp_options()
 	try:
 		asyncio.run(main())
 	except KeyboardInterrupt:

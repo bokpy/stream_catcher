@@ -1,8 +1,32 @@
 #!/usr/bin/env python3
+"""
+Find stream url in har file saved with the F12 devtools method.
+from sites (non Youtube) like:
+https://www.skylinewebcams.com/ is Google
+https://www.earthcam.com/
+https://explore.org/livecams works
+https://www.panomax.com/en
+https://www.google.com/search?q=https://www.roundshot.com/en/webcams.html
+https://webcam.nl/live_streaming/ is Youtube
+http://www.insecam.org/ is Youtube
+
+
+Location               Platform         View Description
+Venice, Italy          SkylineWebcams   St. Mark's Basin & Rialto Bridge (incredible at sunrise).
+ISS (Space)	NASA Live  High-definition  views of Earth from the International Space Station.
+Zermatt, Switzerland   Zermatt.ch       Direct HD streams of the Matterhorn from multiple altitudes.
+New York City          EarthCam         4K Panoramic "Skyline" view from across the river.
+Amsterdam              DamSquare.nl     Rotating HD views of Dam Square and the Royal Palace.
+
+Youtube likes to complain about detected bot activity.
+search example skipping youtube and facebook:
+city name live webcam -site:youtube.com -site:facebook.com
+"""
 import re
 from CatcherUtilities import service_call,Har_Quick_Reference
 import sys
 import json
+import requests
 
 from icecream import ic
 ic.configureOutput(includeContext=True)
@@ -19,7 +43,10 @@ parser = argparse.ArgumentParser(
 parser.add_argument('-v', '--verbose',action='store_true',help="add yt-dlp stream data to the output")
 parser.add_argument('-m', '--m3u8'   ,action='store_true',help="look for m3u8 files (default)")
 parser.add_argument('-y', '--youtube',action='store_true',help="look for youtube streams")
-parser.add_argument('-e', '--explain',action='store_true',help="Some explanation")
+parser.add_argument('-e', '--explain', action='store_true', help="Some explanation")
+parser.add_argument('-p', '--playlist'
+                    , action='store_true'
+                    , help="Add the contents of a m3u8 file to the output")
 
 parser.add_argument(
     '-l', '--limit',          # The flags
@@ -47,10 +74,23 @@ def Har_M3U8_Urls(file:str,limit:int=0)->list:
 				if found_url not in url_set:
 					print (f'add "{found_url}"')
 					url_set.add(found_url)
-					url_list.append({'url':found_url,'name':'No Name'})
-					if limit>0 and len(urls)>=limit:
+					new_url={'url':found_url,'name':'No Name'}
+					if args.playlist:
+						new_url['playlist']=get_playlist(found_url)
+					url_list.append(new_url)
+					if limit > 0 and len(url_list)>=limit:
 						return url_list
 	return url_list
+
+def get_playlist(url:str)->str:
+	r = requests.get(url)
+	if r.status_code == 200:
+		return r.text
+	print (f'Request for "{url}" failed.')
+	error_str= requests.status_codes._codes[r.status_code]
+	print(f'{r.status_code} "{error_str}"')
+	return error_str
+	
 
 def Add_Stream_Info(stream_urls):
 	# yt-dlp --dump-json --flat-playlist "https://example.com/playlist.m3u8"
@@ -65,7 +105,7 @@ def Add_Stream_Info(stream_urls):
 def output_file_name():
 	output_json = args.outfile
 	if output_json:
-		if output_json[-5] != '.json':
+		if output_json[-5:] != '.json':
 			output_json += '.json'
 		return output_json
 	return None
