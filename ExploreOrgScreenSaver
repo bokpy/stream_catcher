@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+# lives as /usr/libexec/xscreensaver/StreamScreenSaver
+
+import subprocess
+import os
+import random
+import time
+#import psutil
+import sys
+#import glob
+import json
+from time import sleep
+import argparse
+import atexit
+
+#from selenium.webdriver.common.devtools.v143.fetch import continue_request
+
+parser = argparse.ArgumentParser(
+	prog='StreamScreenSaver',
+	description='A xscreensaver hack to play streams as in the screensaver\nread the readme.md for more info.\n',
+	epilog='Enjoy'
+)
+
+parser.add_argument('-t', '--show-time',type=int,nargs='?',help="time in seconds a stream is shown")
+parser.add_argument('-w', '--window-id', type=str, nargs='?', help="root window id passed by the xscreensaver")
+parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a stream "original","stretch" or "zoom"')
+
+args = parser.parse_args()
+
+BROWSERS = ["chrome", "firefox", "brave", "opera", "chromium"]
+CONFIG_DIR=os.path.expanduser("~/.config/stream_catcher/")
+COOKIES_FILE=CONFIG_DIR+ 'cookies.txt'
+PATIENTS_SECS = 3
+MAX_PICK = 800
+
+# Parameter candidates
+SHOW_TIME_SECS = 12  # Time to show the stream in seconds
+START_TIMEOUT_SECS = 15  # Time to wait for a stream to start
+
+XSCREENSAVER_WINDOW=None
+if 'XSCREENSAVER_WINDOW' in os.environ:
+	XSCREENSAVER_WINDOW=os.environ['XSCREENSAVER_WINDOW']
+	print(f'{XSCREENSAVER_WINDOW=}')
+
+class ExploreOrgStream:
+	url_base = "https://outbound-production.explore.org/stream-production-"
+	url_tail = "/.m3u8"
+	explore_dir = CONFIG_DIR + "explore.org/"
+	tested_urls_file = explore_dir + "tested.json"
+	displayer = None
+	
+	def __init__(S,displayer):
+		ExploreOrgStream.displayer = displayer
+		S.pick = -1
+		if not os.path.isdir(ExploreOrgStream.explore_dir):
+			try:
+				os.mkdir(ExploreOrgStream.explore_dir)
+			except OSError as e:
+				print(f'could not make dir "{ExploreOrgStream.explore_dir}"')
+				exit(e.errno)
+		
+		S.tested={}
+		if os.path.isfile(ExploreOrgStream.tested_urls_file):
+			try:
+				with open(ExploreOrgStream.tested_urls_file,"r") as json_file:
+					S.tested = json.load(json_file)
+			except OSError as e:
+				print(f'Reading "{ExploreOrgStream.tested_urls_file}" failed.')
+				print(f'{e}')
+				exit(e.errno)
+		atexit.register(S.store_tested)
+				
+	def url_str(S):
+		return S.url_base+ str(S.pick) + S.url_tail
+	
+	def store_tested(S):
+		print(f'store_tested() Save test data')
+		was_tested={}
+		if os.path.isfile(ExploreOrgStream.tested_urls_file):
+			try:
+				with open(ExploreOrgStream.tested_urls_file,"r") as json_file:
+					was_tested = json.load(json_file)
+			except OSError as e:
+				print(f'Reading "{ExploreOrgStream.tested_urls_file}" failed.')
+				print(f'{e}')
+				exit(e.errno)
+		save_tested = was_tested | S.tested
+		#print(json.dumps(save_tested,indent=2))
+		with open(ExploreOrgStream.tested_urls_file,"w") as json_file:
+			try:
+				json.dump(save_tested,json_file,indent=4)
+			except OSError as e:
+				print(f'Failed to save data to "{ExploreOrgStream.tested_urls_file}"')
+				print(e)
+		
+	def pick_a_nice_stream(S):
+		global MAX_PICK
+		while True:
+			S.pick = random.randint(0,MAX_PICK) + 1
+			print(f'{S.pick=}')
+			if not S.pick in S.tested : # not tested try to runit
+				return S.url_str()
+			if S.tested[S.pick]['good']:
+				return S.tested[S.pick]['url']
+	
+	def run(S):
+		while True:
+			url = S.pick_a_nice_stream()
+			print(f'run shows "{url}"')
+			ok = ExploreOrgStream.displayer.clip_show(url)
+			S.tested[S.pick] = {'url':url,'good':ok}
+	
+class MpvPlayer:
+	options = ["mpv"]
+	clip_length = 20
+	
+	def __init__(S):
+		global XSCREENSAVER_WINDOW
+		print(f'MpvPlayer")')
+		S.running=False
+		S.poll = None
+		
+		if XSCREENSAVER_WINDOW:
+			print(f'{XSCREENSAVER_WINDOW=}')
+			MpvPlayer.options += ["-no-audio","-really-quiet","--fullscreen","-no-stop-screensaver"]
+			MpvPlayer.options += ['--wid='+str(XSCREENSAVER_WINDOW)]
+			S.screen_mode_options()
+		else:
+			pass
+			# S.screen_mode_options()
+			# S.mpv_options.append('--fullscreen')
+		
+		print (f'{MpvPlayer.options=}')
+		
+	def set_clip_time(S,secs):
+		MpvPlayer.clip_length = secs
+		return S
+		
+	def clip_show(S,url:str)->bool:
+		"""
+		run mpv with the given url
+		:param url: an explore.org m3u8 url
+		:type url: str
+		:return: True is stream was displayed with success
+		:rtype: bool
+		"""
+		global PATIENT_SECS
+		
+		print(f'options={MpvPlayer.options + [url]}')
+		stop_time = time.time() + MpvPlayer.clip_length
+		mpv_proc = subprocess.Popen(MpvPlayer.options + [url],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+		time.sleep(PATIENTS_SECS)
+		while time.time() < stop_time:
+			if mpv_proc.poll():
+				print(f'StreamDisplayer in run FAILED')
+				return False
+			for line in mpv_proc.stdout:
+				print(line.strip())
+			
+			time.sleep(3)
+		mpv_proc.terminate()
+		return True
+		
+	def screen_mode_options(S):
+		if args.mode:
+			if args.mode == 'original':
+				return
+			if args.mode == 'stretch':
+				MpvPlayer.options += ["--keepaspect=no"]
+				return
+			if args.mode == 'zoom':
+				MpvPlayer.options += ["--video-zoom=1","--panscan=1.0"]
+				return
+			MpvPlayer.options += ["--keepaspect=no"]
+		
+	# def is_running(S):
+	# 	S.poll = S.mpv_proc.poll()
+	# 	#print(f'{S.poll=}')
+	# 	if S.poll:
+	# 		S.running = False
+	# 		return False
+	# 	S.running = psutil.pid_exists(S.mpv_proc.pid)
+	# 	return S.running
+	#
+	def terminate(S):
+		if S.running:
+			S.mpv_proc.terminate()
+		S.running = False
+	
+	def kill(S):
+		if S.running:
+			S.mpv_proc.kill()
+		S.running = False
+	
+	def cookies_chooser(S):
+		global COOKIES_FILE,BROWSERS
+		for browser in BROWSERS:
+			if is_process_running(browser):
+				S.mpv_options += [f"--ytdl-raw-options=cookies-from-browser={browser}"]
+				return
+		if os.path.isfile(COOKIES_FILE):
+			S.mpv_options += [f"--ytdl-raw-options=cookies={COOKIES_FILE}"]
+			
+def main():
+	global ACTIVE_STREAM,XSCREENSAVER_WINDOW,SHOW_TIME_SECS
+	print (sys.argv)
+	
+	clip_displayer = MpvPlayer()
+	if args.show_time:
+		clip_displayer.set_clip_time(args.show_time)
+		
+	saver = ExploreOrgStream(clip_displayer)
+	saver.run()
+	
+if __name__ == '__main__':
+	try:
+		main()
+	except KeyboardInterrupt:
+		print("\nScreensaver halted.")
+		sys.exit(0)
+		

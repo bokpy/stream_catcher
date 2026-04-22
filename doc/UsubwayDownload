@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+import subprocess
+import os
+import random
+import time
+import psutil
+import sys
+import glob
+import json
+from time import sleep
+import argparse
+
+# mpv --stream-record=test_case.mkv https://youtu.be/DyPxrWnjRTA?si=E3BkZbM1jv5erXol
+# Consider trying `--profile=fast` and/or `--hwdec=auto-safe` as they may help.
+
+parser = argparse.ArgumentParser(
+	prog='UsubwayDownload',
+	description='Download media from a Youtube link or from other links that work',
+	epilog='Enjoy'
+)
+parser.add_argument("url", help="url of a video")
+parser.add_argument("outfile",default=None,nargs='?',help="file to store the video")
+
+#parser.add_argument('-t', '--show-time',type=int,nargs='?',help="time in seconds a stream is shown")
+
+# parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a stream "original","stretch" or "zoom"')
+
+args = parser.parse_args()
+
+
+
+def main():
+	print(f'{args=}')
+	
+if __name__ == '__main__':
+	main()
+ 
