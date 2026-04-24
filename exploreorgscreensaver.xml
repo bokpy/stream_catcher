@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="ISO-8859-1"?>
 
-<screensaver name="StreamScreenSaver" _label="StreamScreenSaver">
+<screensaver name="ExploreOrgScreenSaver" _label="ExploreOrgScreenSaver">
 <!--
     <command arg="- -root"/>
 
@@ -52,8 +52,8 @@
     <xscreensaver-updater/>
 
     <_description>
-        Showing live streams.
-        More info in the readme.md of Project stream_catcher.
+        Shows clips of streams from the "Explore.org" website.
+        More info in the readme.md (when written) of Project stream_catcher.
 
         Written by B. van der Burg ; 2026.
     </_description>

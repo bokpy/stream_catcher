@@ -5,15 +5,39 @@ import subprocess
 import os
 import random
 import time
-#import psutil
+import re
 import sys
 #import glob
 import json
 from time import sleep
 import argparse
+import sqlite3
 import atexit
 
-#from selenium.webdriver.common.devtools.v143.fetch import continue_request
+mpv_error={
+ 0 : "Success"
+,1 :"Event queue full"
+,2 :"Memory allocation failed"
+,3 :"mpv core not initialized"
+,4 :"Invalid or unsupported parameter value"
+,5 :"Option doesn't exist"
+,6 :"Unsupported option format"
+,7 :"Option parsing failed"
+,8 :"Property doesn't exist"
+,9 :"Unsupported property format"
+,10:"Property unavailable (subsystem inactive)"
+,11:"Error setting or getting property"
+,12:"General command error"
+,13:"Generic loading error"
+,14:"Audio output initialization failed"
+,15:"Video output initialization failed"
+,16:"No audio or video data to play"
+,17:"Unknown file format"
+,18:"Unsupported system requirements"
+,19:"Function not implemented"
+}
+# from icecream import ic
+# ic.configureOutput(includeContext=True)
 
 parser = argparse.ArgumentParser(
 	prog='StreamScreenSaver',
@@ -27,114 +51,179 @@ parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a st
 
 args = parser.parse_args()
 
-BROWSERS = ["chrome", "firefox", "brave", "opera", "chromium"]
-CONFIG_DIR=os.path.expanduser("~/.config/stream_catcher/")
+#BROWSERS = ["chrome", "firefox", "brave", "opera", "chromium"]
+CONFIG_DIR = os.path.expanduser("~/.config/stream_catcher/")
+EXPLORE_ORG_DB = CONFIG_DIR + 'explore.org.db'
 COOKIES_FILE=CONFIG_DIR+ 'cookies.txt'
 PATIENTS_SECS = 3
+CLIP_LENGTH   = 20
 MAX_PICK = 800
 
-# Parameter candidates
+STORED_GOOD = 0
+STORED_BAD  = 1
+NOT_STORED  = 2
+NEED_LOOKUP = 3
+
+DEBUG_START_TIME = .1
+DEBUG_END_TIME = .1
+
 SHOW_TIME_SECS = 12  # Time to show the stream in seconds
-START_TIMEOUT_SECS = 15  # Time to wait for a stream to start
+
+class Logger:
+	def __init__(S,log_file=''):
+		S.pid = os.getpid()
+		S.log=None
+		if log_file:
+			try:
+				S.log = open(log_file,'a')
+				print(f'Logger("{log_file}" open')
+				atexit.register(S.close_log)
+			except OSError as e:
+				print(e)
+				raise
+			
+	def write_log(S,text):
+		if not S.log:
+			print(f'{S.pid} : {text}')
+			return
+		S.log.write(f'{S.pid} : {text}\n')
+		
+	def flush(S):
+		if not S.log:
+			return
+		S.log.flush()
+
+	def close_log(S):
+		if not S.log:
+			print('No log to close')
+			return
+		print('close log')
+		S.log.close()
+		S.log=None
+	
+LOGGER = Logger(CONFIG_DIR + 'ExploreOSS.log')
 
 XSCREENSAVER_WINDOW=None
 if 'XSCREENSAVER_WINDOW' in os.environ:
 	XSCREENSAVER_WINDOW=os.environ['XSCREENSAVER_WINDOW']
 	print(f'{XSCREENSAVER_WINDOW=}')
+	
+	
+class MpvOutput(dict):
+	# (+) Video --vid=1 (h264 1920x1080 30.000fps)
+    # (+) Audio --aid=1 (aac 2ch 44100Hz)
+    #AO: [pipewire] 44100Hz stereo 2ch floatp
+    #VO: [gpu] 1920x1080 yuv420p
+
+	def __init__(S,txt):
+		dict.__init__(S)
+		S['valid']=False
+		S['video_codec']='Unkown'
+		S['scrw']=-1
+		S['scrh']=-1
+		S['fps']=-1
+		S['audio_channels']=-1
+		S['audio_codec']='Unkown'
+		S['sample_rate']=-1
+
+		line=txt.split('\n')
+		match = re.findall(r'Video [^(]+\((\S+) (\d\d\d*)x(\d\d\d*) ([\d.]*)',line[0])
+		if not match:
+			return
+		item = match[0]
+		S['video_codec']=item[0]
+		S['scrw']= int(item[1])
+		S['scrh']= int(item[2])
+		S['fps'] = int(item[3].replace('.',''))
+		match = re.findall(r'Audio [^(]+\((\S+) (\d+)ch (\d+)Hz',line[1])
+		if not match:
+			return
+		item = match[0]
+		S['audio_codec']    = item[0]
+		S['audio_channels'] = int(item[1])
+		S['sample_rate']    = int(item[2])
+		S['valid']          = True
+		
+	def show(S):
+		print(json.dumps(S,indent=4))
 
 class ExploreOrgStream:
 	url_base = "https://outbound-production.explore.org/stream-production-"
 	url_tail = "/.m3u8"
-	explore_dir = CONFIG_DIR + "explore.org/"
-	tested_urls_file = explore_dir + "tested.json"
-	displayer = None
 	
-	def __init__(S,displayer):
-		ExploreOrgStream.displayer = displayer
-		S.pick = -1
-		if not os.path.isdir(ExploreOrgStream.explore_dir):
-			try:
-				os.mkdir(ExploreOrgStream.explore_dir)
-			except OSError as e:
-				print(f'could not make dir "{ExploreOrgStream.explore_dir}"')
-				exit(e.errno)
+	def __init__(S,displayer,streamdb):
+		S.displayer  = displayer
+		S.streamdb   = streamdb
+		S.pick       = -1
+		S.url_status = NOT_STORED
+		S.url        = ''
 		
-		S.tested={}
-		if os.path.isfile(ExploreOrgStream.tested_urls_file):
-			try:
-				with open(ExploreOrgStream.tested_urls_file,"r") as json_file:
-					S.tested = json.load(json_file)
-			except OSError as e:
-				print(f'Reading "{ExploreOrgStream.tested_urls_file}" failed.')
-				print(f'{e}')
-				exit(e.errno)
-		atexit.register(S.store_tested)
-				
 	def url_str(S):
 		return S.url_base+ str(S.pick) + S.url_tail
 	
-	def store_tested(S):
-		print(f'store_tested() Save test data')
-		was_tested={}
-		if os.path.isfile(ExploreOrgStream.tested_urls_file):
-			try:
-				with open(ExploreOrgStream.tested_urls_file,"r") as json_file:
-					was_tested = json.load(json_file)
-			except OSError as e:
-				print(f'Reading "{ExploreOrgStream.tested_urls_file}" failed.')
-				print(f'{e}')
-				exit(e.errno)
-		save_tested = was_tested | S.tested
-		#print(json.dumps(save_tested,indent=2))
-		with open(ExploreOrgStream.tested_urls_file,"w") as json_file:
-			try:
-				json.dump(save_tested,json_file,indent=4)
-			except OSError as e:
-				print(f'Failed to save data to "{ExploreOrgStream.tested_urls_file}"')
-				print(e)
-		
 	def pick_a_nice_stream(S):
 		global MAX_PICK
 		while True:
 			S.pick = random.randint(0,MAX_PICK) + 1
-			print(f'{S.pick=}')
-			if not S.pick in S.tested : # not tested try to runit
-				return S.url_str()
-			if S.tested[S.pick]['good']:
-				return S.tested[S.pick]['url']
+			if S.streamdb.is_bad_boy(S.pick) == STORED_BAD:
+				continue
+			#print(f'{S.pick=}')
+			S.url = S.url_str()
+			S.url_status = S.streamdb.url_status_lookup(S.url)
+			if S.url_status == STORED_BAD : # tested and bad, throw the dice agian
+				print(f'pick_a_nice_stream("{S.url}") was marked bad')
+				continue
+			# S.url_status == STORED_GOOD or NOT_STORED
+			return
 	
 	def run(S):
+		global DEBUG_START_TIME,DEBUG_END_TIME,LOGGER
+		
 		while True:
-			url = S.pick_a_nice_stream()
-			print(f'run shows "{url}"')
-			ok = ExploreOrgStream.displayer.clip_show(url)
-			S.tested[S.pick] = {'url':url,'good':ok}
+			LOGGER.flush()
+			DEBUG_START_TIME = time.time()
+			S.pick_a_nice_stream()
+			#print(f'run shows "{S.url}" with {S.url_status=}')
+			ok,data = S.displayer.clip_show(S.url)
+			if ok:
+				if S.url_status == STORED_GOOD: # Was ok and still ok no action
+					run_time = time.time() - DEBUG_START_TIME
+					LOGGER.write_log(f'Good db stream ran {run_time:.3f} seconds')
+					continue
+				# new working stream put it in the db
+				S.streamdb.store_good_status(S.url,data)
+				run_time = time.time() - DEBUG_START_TIME
+				LOGGER.write_log(f'New good ran en stored in {run_time:.3f} seconds')
+				continue
+			else:
+				if S.url_status == NOT_STORED:
+					S.streamdb.store_bad_status(S.url)
+					nap = random.random()*7
+					time.sleep(nap)
+					run_time = time.time() - DEBUG_START_TIME
+					LOGGER.write_log(f'stored new bad tream in {run_time:.3f} sec with {nap:.3f} sec nap.')
+					
 	
 class MpvPlayer:
-	options = ["mpv"]
-	clip_length = 20
 	
 	def __init__(S):
 		global XSCREENSAVER_WINDOW
-		print(f'MpvPlayer")')
-		S.running=False
-		S.poll = None
+		S.options = ["mpv"]
+		# #print(f'MpvPlayer")')
+		# S.running=False
+		# S.poll = None
 		
 		if XSCREENSAVER_WINDOW:
 			print(f'{XSCREENSAVER_WINDOW=}')
-			MpvPlayer.options += ["-no-audio","-really-quiet","--fullscreen","-no-stop-screensaver"]
-			MpvPlayer.options += ['--wid='+str(XSCREENSAVER_WINDOW)]
+			S.options += ["-no-audio","-really-quiet","--fullscreen","-no-stop-screensaver"]
+			S.options += ['--wid='+str(XSCREENSAVER_WINDOW)]
 			S.screen_mode_options()
 		else:
 			pass
 			# S.screen_mode_options()
 			# S.mpv_options.append('--fullscreen')
 		
-		print (f'{MpvPlayer.options=}')
-		
-	def set_clip_time(S,secs):
-		MpvPlayer.clip_length = secs
-		return S
+		#print (f'{S.options=}')
 		
 	def clip_show(S,url:str)->bool:
 		"""
@@ -144,78 +233,209 @@ class MpvPlayer:
 		:return: True is stream was displayed with success
 		:rtype: bool
 		"""
-		global PATIENT_SECS
-		
-		print(f'options={MpvPlayer.options + [url]}')
-		stop_time = time.time() + MpvPlayer.clip_length
-		mpv_proc = subprocess.Popen(MpvPlayer.options + [url],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+		global PATIENTS_SECS,CLIP_LENGTH,LOGGER,DEBUG_START_TIME,DEBUG_END_TIME
+		LOGGER.write_log(f'Show clip "{url}" ' )
+		mpv_proc = subprocess.Popen(S.options + [url],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
 		time.sleep(PATIENTS_SECS)
-		while time.time() < stop_time:
-			if mpv_proc.poll():
-				print(f'StreamDisplayer in run FAILED')
-				return False
-			for line in mpv_proc.stdout:
-				print(line.strip())
+		_count_down = CLIP_LENGTH - PATIENTS_SECS
+		while _count_down > 0:
+			check = mpv_proc.poll()
+			if check:
+				# print(f'FAILED at {_count_down} error {check} code {mpv_proc.returncode}')
+				S.precent_error(mpv_proc.stderr.read())
+				mpv_proc.terminate()
+				return False,'Bad'
+			time.sleep(1)
+			_count_down -= 1
 			
-			time.sleep(3)
 		mpv_proc.terminate()
-		return True
+		
+		stdout_txt = mpv_proc.stdout.read()
+		#print(f'clip_show("{url}")-> True,>>>>{stdout_txt}<<<<')
+		print ("Success")
+		return True,stdout_txt
+	
+	def precent_error(S,e_txt):
+		if 'rror 403' in e_txt:
+			print ('Error 403: Forbidden')
+			return
+		for line in e_txt.split('\n'):
+			print(f'\t{line}')
+			
+		error_txt = e_txt.split('\n')
 		
 	def screen_mode_options(S):
 		if args.mode:
 			if args.mode == 'original':
 				return
 			if args.mode == 'stretch':
-				MpvPlayer.options += ["--keepaspect=no"]
+				S.options += ["--keepaspect=no"]
 				return
 			if args.mode == 'zoom':
-				MpvPlayer.options += ["--video-zoom=1","--panscan=1.0"]
+				S.options += ["--video-zoom=1","--panscan=1.0"]
 				return
-			MpvPlayer.options += ["--keepaspect=no"]
+			S.options += ["--keepaspect=no"]
 		
-	# def is_running(S):
-	# 	S.poll = S.mpv_proc.poll()
-	# 	#print(f'{S.poll=}')
-	# 	if S.poll:
-	# 		S.running = False
-	# 		return False
-	# 	S.running = psutil.pid_exists(S.mpv_proc.pid)
-	# 	return S.running
-	#
-	def terminate(S):
-		if S.running:
-			S.mpv_proc.terminate()
-		S.running = False
+class ExploreOrgDb:
+
+	table = """
+        CREATE TABLE IF NOT EXISTS streams (
+            url    TEXT PRIMARY KEY,
+            good   INTEGER DEFAULT 1,
+            width  INTEGER DEFAULT 0,
+            height INTEGER DEFAULT 0,
+            time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );"""
 	
-	def kill(S):
-		if S.running:
-			S.mpv_proc.kill()
-		S.running = False
+	def __init__(S):
+		S.createdb_if_needed()
+		S.bad_boys_set = set()
+		S.num_reg = re.compile(r'-(\d+)/\.')
+		S.old_bad_boys()
+		
+	def store_good_status(S,url:str,data:str)->None:
+		"""
+		store a good status for a given url
+		:param url: a tested url that worked with mpv
+		:type url: text
+		:param data: output of mpv piped stdout
+		:type data: str
+		:return: None
+		:rtype: None
+		"""
+		si = MpvOutput(data)
+		if not si['valid']:
+			print (f'No valid mpv data')
+			si.show()
+		
+		try:
+			with sqlite3.connect(EXPLORE_ORG_DB) as con:
+				cur = con.cursor()
+				try:
+					
+					cur.execute("INSERT INTO streams VALUES (:url,:good,:width,:height,:time)",
+				            {'url':url
+					            ,'good':True
+					            ,'width':si['scrw']
+					            ,'height':si['scrh']
+					            ,'time':time.time()})
+				except KeyError as e :
+					si.show()
+					print(e)
+					raise
+				con.commit()
+		except sqlite3.IntegrityError as e:
+			if "UNIQUE constraint failed" in str(e):
+				print("Skipping: This URL is already in the database.")
+			else:
+				raise e
+
+	def store_bad_status(S,url:str)->None:
+		"""
+		store a bad status for a given url
+		:param url: a tested url that not worked with mpv
+		:type url: text
+		:return: None
+		:rtype: None
+		"""
+		
+		with sqlite3.connect(EXPLORE_ORG_DB) as con:
+			cur = con.cursor()
+			try:
+				cur.execute("INSERT INTO streams VALUES (:url,:good,:width,:height,:time)"
+				            ,{'url':url,'good':False,'width':0,'height':0,'time':time.time()})
+				con.commit()
+			except sqlite3.IntegrityError as e:
+				if "UNIQUE constraint failed" in str(e):
+					print("Skipping: This URL is already in the database.")
+				else:
+					raise e
+
+	def is_bad_boy(S,id):
+		if id in S.bad_boys_set:
+			return STORED_BAD
+		return NEED_LOOKUP
 	
-	def cookies_chooser(S):
-		global COOKIES_FILE,BROWSERS
-		for browser in BROWSERS:
-			if is_process_running(browser):
-				S.mpv_options += [f"--ytdl-raw-options=cookies-from-browser={browser}"]
-				return
-		if os.path.isfile(COOKIES_FILE):
-			S.mpv_options += [f"--ytdl-raw-options=cookies={COOKIES_FILE}"]
-			
+	def url_status_lookup(S,url:str)->int:
+		"""
+		Look the url up in the database store result in S.lookup
+		:param url: url to look up
+		:type url: str
+		:return: 0 = ok, 1 = bad, 2 = not checked not in the database jet
+		:rtype: int
+		"""
+		
+		
+		with sqlite3.connect(EXPLORE_ORG_DB) as conn:
+			cursor = conn.cursor()
+			cursor.execute("SELECT * FROM streams WHERE url=?", (url,))
+			row = cursor.fetchone()
+		if not row:
+			return NOT_STORED
+		if row[1] == True: # the "good" field
+			return STORED_GOOD
+		return STORED_BAD
+
+	def old_bad_boys(S):
+		#reg = re.compile(r'-(\d+)/\.')
+		with sqlite3.connect(EXPLORE_ORG_DB) as con:
+			cursor = con.cursor()
+			try:
+				cursor.execute("SELECT url FROM streams WHERE good=?", (0,))
+				rows = cursor.fetchall()
+				#print(rows)
+			except sqlite3.OperationalError as e:
+				print(e)
+				
+		for url_tuple in rows:
+			url = url_tuple[0]
+			#print(f'{url=}')
+			match = S.num_reg.findall(url)
+			if match:
+				id = int(match[0])
+				S.bad_boys_set.add(id)
+		#print(S.bad_boys_set)
+		
+	def createdb_if_needed(S):
+		if not os.path.isdir(CONFIG_DIR):
+			try:
+				os.mkdir(CONFIG_DIR)
+			except OSError as e:
+				print(f'Could not make dir "{CONFIG_DIR}".')
+				print(e)
+				exit(e.errno)
+		try:
+			con = sqlite3.connect(EXPLORE_ORG_DB)
+			print(f'Opened "{EXPLORE_ORG_DB}" SQLite database\nwith version {sqlite3.sqlite_version} successfully.')
+		except sqlite3.OperationalError as e:
+			print(f'"Failed to open "{EXPLORE_ORG_DB}"')
+			print(e)
+			exit(1)
+		cur = con.cursor()
+		cur.execute(ExploreOrgDb.table)
+		con.close()
+
+
 def main():
-	global ACTIVE_STREAM,XSCREENSAVER_WINDOW,SHOW_TIME_SECS
-	print (sys.argv)
-	
+	global CONFIG_DIR,XSCREENSAVER_WINDOW,CLIP_LENGTH,LOGGER
+	#print (sys.argv)
+	if XSCREENSAVER_WINDOW:
+		LOG_FILE = open(CONFIG_DIR+'ExploreOSS.log','a')
 	clip_displayer = MpvPlayer()
+	url_db = ExploreOrgDb()
 	if args.show_time:
-		clip_displayer.set_clip_time(args.show_time)
+		CLIP_LENGTH=args.show_time
 		
-	saver = ExploreOrgStream(clip_displayer)
+	saver = ExploreOrgStream(clip_displayer,url_db)
 	saver.run()
 	
 if __name__ == '__main__':
+	LOGGER.write_log(f'ExploreOrgScreenSaver pid({os.getpid()})')
 	try:
 		main()
-	except KeyboardInterrupt:
+	except Exception as e:
+		LOGGER.write_log(f'Exception as {e}')
+		print(e)
 		print("\nScreensaver halted.")
 		sys.exit(0)
 		
