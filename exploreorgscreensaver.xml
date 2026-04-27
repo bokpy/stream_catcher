@@ -22,9 +22,11 @@
         default="240"
 />
     <select id="videoaspect">
-
-        <option id="original"
-        _label="stream size"
+        <option id="aspect"
+        _label="Video aspect"
+        />
+         <option id="original"
+        _label="original"
         arg-set="--mode original"
         />
         <option id="stretch"
@@ -37,6 +39,11 @@
         />
 
     </select>
+
+    <boolean id="tested_question"
+             _label="Use only tested streams"
+             arg-set="--only-tested"
+    />
 
 <!--
     <number id="count" type="slider" arg="- -count %"

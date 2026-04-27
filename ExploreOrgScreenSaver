@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# lives as /usr/libexec/xscreensaver/StreamScreenSaver
+# about logging xscreensaver
+# https://gemini.google.com/share/aad943314f02
+#
 
 import subprocess
 import os
@@ -12,7 +14,9 @@ import json
 from time import sleep
 import argparse
 import sqlite3
+import socket
 import atexit
+
 
 mpv_error={
  0 : "Success"
@@ -40,75 +44,57 @@ mpv_error={
 # ic.configureOutput(includeContext=True)
 
 parser = argparse.ArgumentParser(
-	prog='StreamScreenSaver',
+	prog='ExploreOrgScreenSaver',
 	description='A xscreensaver hack to play streams as in the screensaver\nread the readme.md for more info.\n',
 	epilog='Enjoy'
 )
 
-parser.add_argument('-t', '--show-time',type=int,nargs='?',help="time in seconds a stream is shown")
+parser.add_argument('-t', '--show-time',default=20.0,type=int,nargs='?',help="time in seconds a stream is shown")
 parser.add_argument('-w', '--window-id', type=str, nargs='?', help="root window id passed by the xscreensaver")
 parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a stream "original","stretch" or "zoom"')
+parser.add_argument('-o', '--only-tested', action='store_true', help="Don't try to show untested streams")
+parser.add_argument('-s', '--socket', action='store_true', help="Use mpv as sever on a socket")
 
 args = parser.parse_args()
 
-#BROWSERS = ["chrome", "firefox", "brave", "opera", "chromium"]
 CONFIG_DIR = os.path.expanduser("~/.config/stream_catcher/")
 EXPLORE_ORG_DB = CONFIG_DIR + 'explore.org.db'
-COOKIES_FILE=CONFIG_DIR+ 'cookies.txt'
-PATIENTS_SECS = 3
-CLIP_LENGTH   = 20
-MAX_PICK = 800
+#COOKIES_FILE=CONFIG_DIR+ 'cookies.txt'
+#PATIENTS_SECS = .4
+#CLIP_LENGTH   = 20.0
+MAX_PICK = 1200
 
 STORED_GOOD = 0
 STORED_BAD  = 1
 NOT_STORED  = 2
 NEED_LOOKUP = 3
 
-DEBUG_START_TIME = .1
-DEBUG_END_TIME = .1
-
-SHOW_TIME_SECS = 12  # Time to show the stream in seconds
-
-class Logger:
-	def __init__(S,log_file=''):
-		S.pid = os.getpid()
-		S.log=None
-		if log_file:
-			try:
-				S.log = open(log_file,'a')
-				print(f'Logger("{log_file}" open')
-				atexit.register(S.close_log)
-			except OSError as e:
-				print(e)
-				raise
-			
-	def write_log(S,text):
-		if not S.log:
-			print(f'{S.pid} : {text}')
-			return
-		S.log.write(f'{S.pid} : {text}\n')
-		
-	def flush(S):
-		if not S.log:
-			return
-		S.log.flush()
-
-	def close_log(S):
-		if not S.log:
-			print('No log to close')
-			return
-		print('close log')
-		S.log.close()
-		S.log=None
+def xscreensaver_window_options():
+	if not 'XSCREENSAVER_WINDOW' in os.environ:
+		return []
+	xscreensaver_window=os.environ['XSCREENSAVER_WINDOW']
+	return [
+	"-no-audio"
+	,"-quiet"
+	,"-hwdec=no"
+	#,"-really-quiet"
+	,"--fullscreen"
+	#--stop-screensaver=<yes|no|always>
+	,"--stop-screensaver=always"
+	,'--wid='+str(xscreensaver_window)
+	]
 	
-LOGGER = Logger(CONFIG_DIR + 'ExploreOSS.log')
+def screen_mode_options():
+	if not args.mode:
+		return []
+	if args.mode == 'original':
+		return[]
+	if args.mode == 'stretch':
+		return ["--keepaspect=no"]
+	if args.mode == 'zoom':
+		return ["--video-zoom=1", "--panscan=1.0"]
+	return []
 
-XSCREENSAVER_WINDOW=None
-if 'XSCREENSAVER_WINDOW' in os.environ:
-	XSCREENSAVER_WINDOW=os.environ['XSCREENSAVER_WINDOW']
-	print(f'{XSCREENSAVER_WINDOW=}')
-	
-	
 class MpvOutput(dict):
 	# (+) Video --vid=1 (h264 1920x1080 30.000fps)
     # (+) Audio --aid=1 (aac 2ch 44100Hz)
@@ -117,115 +103,167 @@ class MpvOutput(dict):
 
 	def __init__(S,txt):
 		dict.__init__(S)
-		S['valid']=False
-		S['video_codec']='Unkown'
-		S['scrw']=-1
-		S['scrh']=-1
-		S['fps']=-1
-		S['audio_channels']=-1
-		S['audio_codec']='Unkown'
-		S['sample_rate']=-1
-
-		line=txt.split('\n')
-		match = re.findall(r'Video [^(]+\((\S+) (\d\d\d*)x(\d\d\d*) ([\d.]*)',line[0])
-		if not match:
-			return
-		item = match[0]
-		S['video_codec']=item[0]
-		S['scrw']= int(item[1])
-		S['scrh']= int(item[2])
-		S['fps'] = int(item[3].replace('.',''))
-		match = re.findall(r'Audio [^(]+\((\S+) (\d+)ch (\d+)Hz',line[1])
-		if not match:
-			return
-		item = match[0]
-		S['audio_codec']    = item[0]
-		S['audio_channels'] = int(item[1])
-		S['sample_rate']    = int(item[2])
-		S['valid']          = True
+		val1 = val2 = False
+		lines=txt.split('\n')
+		for line in lines:
+			if not val1:
+				match = re.findall(r'Video [^(]+\((\S+) (\d\d\d*)x(\d\d\d*) ([\d.]*)',line)
+				if match:
+					val1 = True
+					item = match[0]
+					S['video_codec']=item[0]
+					S['scrw']= int(item[1])
+					S['scrh']= int(item[2])
+					S['fps'] = int(item[3].replace('.',''))
+			if not val2:
+				match = re.findall(r'Audio [^(]+\((\S+) (\d+)ch (\d+)Hz',line)
+				if match:
+					val2 = True
+					item = match[0]
+					S['audio_codec']    = item[0]
+					S['audio_channels'] = int(item[1])
+					S['sample_rate']    = int(item[2])
+			S['valid'] = val1 and val2
+			if S['valid']:
+				S.show()
+				return
 		
 	def show(S):
 		print(json.dumps(S,indent=4))
 
+class SocketMpv:
+	# https://mpv.io/manual/stable/#json-ipc
+	def __init__(S,clip_length, patients_secs = .3):
+		S.clip_length   = clip_length
+		S.options = ["mpv"]
+		S.options += xscreensaver_window_options()
+		S.options += screen_mode_options()
+		
+		sock = int((time.time() * 1000) % 1000)
+		S.socket_path = '/tmp/mpv-socket-'+ str(sock)
+		print(f'{S.socket_path=}')
+		S.options += ['--input-ipc-server='+S.socket_path,'--idle']
+		S.server_proc = subprocess.Popen(
+			S.options + ["data/intro.mp4"],
+			stdout=subprocess.PIPE,stderr=subprocess.STDOUT
+		)
+		time.sleep(.5)
+		S.count_down = S.clip_length
+		S.dt_check = .3
+		S.request_id = 0
+	
+	def socket(S):
+		return True
+	
+	def send_command(S, *args):
+		"""Formats and sends a JSON command to the mpv socket."""
+		if not os.path.exists(S.socket_path):
+			print(f"Error: Socket {S.socket_path} not found. Is mpv running?")
+			return None
+		
+		# Build the JSON payload
+		S.request_id += 1
+		payload = {"command": list(args), "request_id": S.request_id }
+		
+		# Connect to the Unix Domain Socket
+		with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+			client.connect(S.socket_path)
+			client.sendall((json.dumps(payload) + '\n').encode('utf-8'))
+			
+			# Receive response (mpv sends a JSON response for every command)
+			response = client.recv(4096)
+			ret_str=response.decode('utf-8').strip()
+			print(f'response utf-8 "{ret_str}"')
+			return ret_str
+		
+	def clip_show(S,url):
+		running = False
+		while S.count_down > 0.0:
+			res = S.send_command("get_property", "time-pos" )
+			time.sleep(S.dt_check)
+			S.count_down -= S.dt_check
+			resdict = json.loads(res)
+			if resdict["error"] == "success":
+				running = True
+				continue
+			if ["error"] == "property unavailable":
+			
+			print (json.dumps(resdict,indent=4))
+			S.send_command('loadfile', url, 'replace')
+		return False,'testing'
+		
 class ExploreOrgStream:
 	url_base = "https://outbound-production.explore.org/stream-production-"
 	url_tail = "/.m3u8"
-	
-	def __init__(S,displayer,streamdb):
+
+	def __init__(S,displayer,streamdb,max_pick):
 		S.displayer  = displayer
 		S.streamdb   = streamdb
-		S.pick       = -1
-		S.url_status = NOT_STORED
-		S.url        = ''
+		S.max_pick   = max_pick
+		#S.temp_list_current = len(ExploreOrgStream.temp_list)
 		
 	def url_str(S):
 		return S.url_base+ str(S.pick) + S.url_tail
 	
 	def pick_a_nice_stream(S):
-		global MAX_PICK
+		#print ()
 		while True:
-			S.pick = random.randint(0,MAX_PICK) + 1
+			S.pick = random.randint(0,S.max_pick) + 1
+			#S.pick = S.pick_from_list()
+			print (f'[{S.pick:4} ',end='')
 			if S.streamdb.is_bad_boy(S.pick) == STORED_BAD:
+				print (f'BBOY] ',end='')
 				continue
 			#print(f'{S.pick=}')
 			S.url = S.url_str()
 			S.url_status = S.streamdb.url_status_lookup(S.url)
 			if S.url_status == STORED_BAD : # tested and bad, throw the dice agian
-				print(f'pick_a_nice_stream("{S.url}") was marked bad')
+				print(f'SBAD] ',end='')
 				continue
-			# S.url_status == STORED_GOOD or NOT_STORED
-			return
+			if args.only_tested and S.url_status == NOT_STORED:
+				print(f'NEW ] ',end='')
+				continue
+			if S.url_status == NOT_STORED:
+				print (f'NEW ] ',end='')
+				
+			else:
+				print (f'GOOD] ',end='')
+			return # working on merging an old list
 	
 	def run(S):
-		global DEBUG_START_TIME,DEBUG_END_TIME,LOGGER
 		
 		while True:
-			LOGGER.flush()
-			DEBUG_START_TIME = time.time()
 			S.pick_a_nice_stream()
 			#print(f'run shows "{S.url}" with {S.url_status=}')
 			ok,data = S.displayer.clip_show(S.url)
 			if ok:
 				if S.url_status == STORED_GOOD: # Was ok and still ok no action
-					run_time = time.time() - DEBUG_START_TIME
-					LOGGER.write_log(f'Good db stream ran {run_time:.3f} seconds')
 					continue
 				# new working stream put it in the db
 				S.streamdb.store_good_status(S.url,data)
-				run_time = time.time() - DEBUG_START_TIME
-				LOGGER.write_log(f'New good ran en stored in {run_time:.3f} seconds')
 				continue
 			else:
 				if S.url_status == NOT_STORED:
 					S.streamdb.store_bad_status(S.url)
 					nap = random.random()*7
 					time.sleep(nap)
-					run_time = time.time() - DEBUG_START_TIME
-					LOGGER.write_log(f'stored new bad tream in {run_time:.3f} sec with {nap:.3f} sec nap.')
 					
-	
 class MpvPlayer:
 	
-	def __init__(S):
-		global XSCREENSAVER_WINDOW
+	def __init__(S,clip_length, patients_secs = .3):
+		print(f'MpvPlayer({clip_length=}, {patients_secs})')
+		S.patients_secs = patients_secs
+		S.clip_length   = clip_length
 		S.options = ["mpv"]
-		# #print(f'MpvPlayer")')
-		# S.running=False
-		# S.poll = None
-		
-		if XSCREENSAVER_WINDOW:
-			print(f'{XSCREENSAVER_WINDOW=}')
-			S.options += ["-no-audio","-really-quiet","--fullscreen","-no-stop-screensaver"]
-			S.options += ['--wid='+str(XSCREENSAVER_WINDOW)]
-			S.screen_mode_options()
-		else:
-			pass
-			# S.screen_mode_options()
-			# S.mpv_options.append('--fullscreen')
+		S.options += xscreensaver_window_options()
+		S.options += screen_mode_options()
 		
 		#print (f'{S.options=}')
+	
+	def socket(S):
+		return False
 		
-	def clip_show(S,url:str)->bool:
+	def clip_show(S,url:str):
 		"""
 		run mpv with the given url
 		:param url: an explore.org m3u8 url
@@ -233,11 +271,18 @@ class MpvPlayer:
 		:return: True is stream was displayed with success
 		:rtype: bool
 		"""
-		global PATIENTS_SECS,CLIP_LENGTH,LOGGER,DEBUG_START_TIME,DEBUG_END_TIME
-		LOGGER.write_log(f'Show clip "{url}" ' )
+		command = ' '.join(S.options + [url] )
+		print(f'command : {command}',end=' ')
 		mpv_proc = subprocess.Popen(S.options + [url],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-		time.sleep(PATIENTS_SECS)
-		_count_down = CLIP_LENGTH - PATIENTS_SECS
+		_patience = 0.0
+		_tik = S.patients_secs / 200
+		while _patience < S.patients_secs:
+			time.sleep(_tik)
+			_patience += _tik
+			if mpv_proc.poll():
+				print(f'{mpv_proc.returncode} after {_patience} sec.')
+		
+		_count_down = S.clip_length - S.patients_secs
 		while _count_down > 0:
 			check = mpv_proc.poll()
 			if check:
@@ -245,8 +290,8 @@ class MpvPlayer:
 				S.precent_error(mpv_proc.stderr.read())
 				mpv_proc.terminate()
 				return False,'Bad'
-			time.sleep(1)
-			_count_down -= 1
+			time.sleep(S.patients_secs)
+			_count_down -= S.patients_secs
 			
 		mpv_proc.terminate()
 		
@@ -264,18 +309,7 @@ class MpvPlayer:
 			
 		error_txt = e_txt.split('\n')
 		
-	def screen_mode_options(S):
-		if args.mode:
-			if args.mode == 'original':
-				return
-			if args.mode == 'stretch':
-				S.options += ["--keepaspect=no"]
-				return
-			if args.mode == 'zoom':
-				S.options += ["--video-zoom=1","--panscan=1.0"]
-				return
-			S.options += ["--keepaspect=no"]
-		
+
 class ExploreOrgDb:
 
 	table = """
@@ -365,7 +399,6 @@ class ExploreOrgDb:
 		:rtype: int
 		"""
 		
-		
 		with sqlite3.connect(EXPLORE_ORG_DB) as conn:
 			cursor = conn.cursor()
 			cursor.execute("SELECT * FROM streams WHERE url=?", (url,))
@@ -417,24 +450,30 @@ class ExploreOrgDb:
 
 
 def main():
-	global CONFIG_DIR,XSCREENSAVER_WINDOW,CLIP_LENGTH,LOGGER
+	global CONFIG_DIR
 	#print (sys.argv)
-	if XSCREENSAVER_WINDOW:
-		LOG_FILE = open(CONFIG_DIR+'ExploreOSS.log','a')
-	clip_displayer = MpvPlayer()
+	if args.socket:
+		clip_displayer=SocketMpv(args.show_time)
+	else:
+		clip_displayer=MpvPlayer(args.show_time)
 	url_db = ExploreOrgDb()
-	if args.show_time:
-		CLIP_LENGTH=args.show_time
-		
-	saver = ExploreOrgStream(clip_displayer,url_db)
+	
+	saver = ExploreOrgStream(clip_displayer,url_db,MAX_PICK)
 	saver.run()
 	
+def socket_tester():
+	mpv_sock=SocketMpv()
+	mpv_sock.send_command("show-text", "Hello from Python!", "10000")
+	time.sleep(20)
+	print(f'bye from Socket tester')
+	
 if __name__ == '__main__':
-	LOGGER.write_log(f'ExploreOrgScreenSaver pid({os.getpid()})')
+	# socket_tester()
+	# exit(0)
+	print(f'ExploreOrgScreenSaver pid({os.getpid()})')
 	try:
 		main()
-	except Exception as e:
-		LOGGER.write_log(f'Exception as {e}')
+	except KeyboardInterrupt as e:
 		print(e)
 		print("\nScreensaver halted.")
 		sys.exit(0)
