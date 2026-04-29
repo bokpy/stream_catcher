@@ -11,12 +11,13 @@ import re
 import sys
 #import glob
 import json
-from time import sleep
+from json import JSONDecodeError
+import time
 import argparse
 import sqlite3
 import socket
+import asyncio
 import atexit
-
 
 mpv_error={
  0 : "Success"
@@ -40,8 +41,8 @@ mpv_error={
 ,18:"Unsupported system requirements"
 ,19:"Function not implemented"
 }
-# from icecream import ic
-# ic.configureOutput(includeContext=True)
+from icecream import ic
+ic.configureOutput(includeContext=True)
 
 parser = argparse.ArgumentParser(
 	prog='ExploreOrgScreenSaver',
@@ -49,7 +50,7 @@ parser = argparse.ArgumentParser(
 	epilog='Enjoy'
 )
 
-parser.add_argument('-t', '--show-time',default=20.0,type=int,nargs='?',help="time in seconds a stream is shown")
+parser.add_argument('-t', '--clip-length',default=20.0,type=float,nargs='?',help="display time of a clip in seconds")
 parser.add_argument('-w', '--window-id', type=str, nargs='?', help="root window id passed by the xscreensaver")
 parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a stream "original","stretch" or "zoom"')
 parser.add_argument('-o', '--only-tested', action='store_true', help="Don't try to show untested streams")
@@ -63,38 +64,106 @@ EXPLORE_ORG_DB = CONFIG_DIR + 'explore.org.db'
 #PATIENTS_SECS = .4
 #CLIP_LENGTH   = 20.0
 MAX_PICK = 1200
+'''
+wmctrl -d
 
-STORED_GOOD = 0
-STORED_BAD  = 1
-NOT_STORED  = 2
-NEED_LOOKUP = 3
+0  - DG: 6880x1440  VP: N/A  WA: 0,0 6880x1440  cad
+1  * DG: 6880x1440  VP: 0,0  WA: 0,0 6880x1440  inet
+2  - DG: 6880x1440  VP: N/A  WA: 0,0 6880x1440  file
 
-def xscreensaver_window_options():
-	if not 'XSCREENSAVER_WINDOW' in os.environ:
-		return []
-	xscreensaver_window=os.environ['XSCREENSAVER_WINDOW']
-	return [
-	"-no-audio"
-	,"-quiet"
-	,"-hwdec=no"
-	#,"-really-quiet"
-	,"--fullscreen"
-	#--stop-screensaver=<yes|no|always>
-	,"--stop-screensaver=always"
-	,'--wid='+str(xscreensaver_window)
-	]
+List all desktops managed by the window manager.
+One line is output for each desktop, with the line broken up into space separated columns.
+
+The first column contains an integer desktop number.
+The second column contains a '*' character for the current desktop, otherwise it contains a '-' character.
+The next two columns contain the fixed string DG:
+	 and then the desktop geometry as '<width>x<height>' (e.g. '1280x1024').
+The following two columns contain the fixed string VP:
+	 and then the viewport position in the format '<y>,<y>' (e.g. '0,0').
+The next three columns after this contains the fixed string WA:
+	 and then two columns with the workarea geometry as 'X,Y and WxH' (e.g. '0,0 1280x998').
+The rest of the line contains the name of the desktop (possibly containing multiple spaces).
+'''
+# to find monitors xrandr
+
+def url_str(pick):
+	return "https://outbound-production.explore.org/stream-production-" + str(pick) + "/.m3u8"
 	
-def screen_mode_options():
-	if not args.mode:
-		return []
-	if args.mode == 'original':
-		return[]
-	if args.mode == 'stretch':
-		return ["--keepaspect=no"]
-	if args.mode == 'zoom':
-		return ["--video-zoom=1", "--panscan=1.0"]
-	return []
+def service_call(*args):
+	try:
+		info = subprocess.check_output(args)
+	except subprocess.SubprocessError as e:
+		print(f'{args} failed')
+		print(f'is {args[0]} intalled?')
+		print(f'subprocess.SubprocessError {e}')
+		return None
+	str_info = info.decode('utf-8')
+	return str_info.splitlines()
+	
+def detect_monitors():
+	"""
+	use xrandr output to determine which monitors are conected and thier geometry
+	:return: list of class Monitor
+	:rtype: list[Monitor]
+	"""
+#HDMI-1 connected primary 3440x1440+0+0 (normal left inverted right x axis y axis) 797mm x 334mm
+	detected = []
+	xrandr = service_call('xrandr')
+	for line in xrandr:
+		if ' connected ' in line:
+			print(f'{line}')
+			detected.append(Monitor(line))
+	return detected
 
+class Clip(dict):
+	STORED_GOOD = 0
+	STORED_BAD  = 1
+	NOT_STORED  = 2
+	NEED_LOOKUP = 3
+
+	STATUS = ['STORED_GOOD', 'STORED_BAD ', 'NOT_STORED', 'NEED_LOOKUP']
+
+	def __init__(S,url,status):
+		dict.__init__(S)
+		S['url']=url
+		S['status']=status
+		S.birth = time.time()
+		
+	def __str__(S):
+		return f'Clip("{S['url']}",{Clip.STATUS[S['status']]},{S.live_time(S):6.2f})'
+	
+	def status_str(S):
+		return Clip.STATUS[S['status']]
+		
+	def live_time(S):
+		return time.time() - S.birth
+	
+	def evaluate(S):
+		if 'time' in S:
+			return False
+		if S['time'] < 5:
+			return False
+
+class Monitor:
+	"""
+	Holds the xrandr data of an active monitor
+	geometry and name
+	"""
+	def __init__(S,xrandr_line):
+		S.xrandr_line = xrandr_line
+		S.name=xrandr_line.split()[0]
+		match = re.findall(r'((\d+)x(\d+)\+(\d+)\+(\d+))',xrandr_line)
+		
+		S.geomety=match[0][0]
+		S.w = int(match[0][1])
+		S.h = int(match[0][2])
+		S.x = int(match[0][3])
+		S.y = int(match[0][4])
+		
+	def __str__(S):
+		name = S.xrandr_line.split()[0]
+		return f'monitor "{name}" at [{S.x:4},{S.y:4}]-[{(S.x+S.w):4},{(S.y+S.h):4}]'
+	
 class MpvOutput(dict):
 	# (+) Video --vid=1 (h264 1920x1080 30.000fps)
     # (+) Audio --aid=1 (aac 2ch 44100Hz)
@@ -131,28 +200,107 @@ class MpvOutput(dict):
 	def show(S):
 		print(json.dumps(S,indent=4))
 
-class SocketMpv:
-	# https://mpv.io/manual/stable/#json-ipc
-	def __init__(S,clip_length, patients_secs = .3):
-		S.clip_length   = clip_length
-		S.options = ["mpv"]
-		S.options += xscreensaver_window_options()
-		S.options += screen_mode_options()
+class Displayer:
+	def __init__(S,monitor,url_db):
+		S.monitor = monitor
+		S.name = monitor.name
+		S.db = url_db
+		t = S.clip_length = args.clip_length
+		S.options = ['mpv']
+		S.add_screen_mode_options()
+		S.add_xscreensaver_options()
 		
-		sock = int((time.time() * 1000) % 1000)
-		S.socket_path = '/tmp/mpv-socket-'+ str(sock)
+	def add_screen_mode_options(S):
+		if not args.mode:
+			return
+		if args.mode == 'original':
+			return
+		if args.mode == 'stretch':
+			S.options += ["--keepaspect=no"]
+			return
+		if args.mode == 'zoom':
+			S.options += ["--video-zoom=1", "--panscan=1.0"]
+	
+	def add_xscreensaver_options(S):
+		if 'XSCREENSAVER_WINDOW' in os.environ:
+			wid = str(os.environ['XSCREENSAVER_WINDOW'])
+			S.options +=  [
+			'--wid='+ wid
+			,'-audio=no'
+			,"-quiet"
+			,"-hwdec=no"
+			,"--geometry=" + S.monitor.geomety
+			, '--length=' + str(int(args.clip_length))
+			#,"-really-quiet"
+			,"--fullscreen"
+			]
+			return
+		S.options += [
+			"--geometry=50%x50%"
+			,'--length=10'
+			]
+			
+class SocketMpv(Displayer):
+	# https://mpv.io/manual/stable/#json-ipc
+	def __init__(S,monitor,db):
+		Displayer.__init__(S,monitor,db)
+		S.socket_path = '/tmp/mpv-socket-'+ S.name
 		print(f'{S.socket_path=}')
+		S.name += ' socket'
 		S.options += ['--input-ipc-server='+S.socket_path,'--idle']
 		S.server_proc = subprocess.Popen(
-			S.options + ["data/intro.mp4"],
+			S.options + [CONFIG_DIR + "intro.mp4"],
 			stdout=subprocess.PIPE,stderr=subprocess.STDOUT
 		)
-		time.sleep(.5)
-		S.count_down = S.clip_length
-		S.dt_check = .3
+		time.sleep(1)
+		S.dt_check = .8 # polling interval
 		S.request_id = 0
-	
-	def socket(S):
+		atexit.register(S.say_bye)
+		
+	async def preform(S):
+		on_display = None
+		
+		while True:
+			if on_display and on_display.live_time() > args.clip_length:
+				print(f'To old {on_display.live_time():6.2f} sec')
+			res = S.send_command("get_property", "idle-active")
+			await asyncio.sleep(S.dt_check)
+			if isinstance(res,list):
+				ic(res)
+				continue
+			if 'data' in res:
+				if res["data"]:  # is idle
+					if on_display and on_display['status']==Clip.NOT_STORED:
+						S.db.assess(on_display)
+						await asyncio.sleep(1)
+					on_display = S.db.pick_random_url()
+					S.send_command('loadfile', on_display['url'], 'replace')
+					await asyncio.sleep(1)
+				continue
+			if on_display and not 'data' in on_display:
+				S.ask_stream_info(on_display)
+			print (f'No data res "{res}"')
+			
+	def ask_stream_info(S,clip):
+		tracks = S.send_command("get_property", "track-list")
+		ic(tracks)
+		vo = S.send_command("get_property", "current-vo")
+		ic(vo)
+		ao = S.send_command("get_property", "current-ao")
+		ic(ao)
+		metadata = S.send_command("get_property", "filtered-metadata")
+		ic(metadata)
+		clip['data'] = {'tracks':tracks,'vo':vo,'ao':ao,'metadata':metadata}
+		
+	def say_bye(S):
+		print(f'SocketMpv({S.name}) says bye.' )
+		if S.server_proc:
+			print ( f'close mpv process at "{S.socket_path}"')
+			S.server_proc.terminate()
+			os.remove(S.socket_path)
+		S.server_proc=None
+		
+	def is_on_socket(S):
 		return True
 	
 	def send_command(S, *args):
@@ -166,150 +314,84 @@ class SocketMpv:
 		payload = {"command": list(args), "request_id": S.request_id }
 		
 		# Connect to the Unix Domain Socket
-		with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+		with (socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client):
 			client.connect(S.socket_path)
 			client.sendall((json.dumps(payload) + '\n').encode('utf-8'))
 			
 			# Receive response (mpv sends a JSON response for every command)
 			response = client.recv(4096)
 			ret_str=response.decode('utf-8').strip()
-			print(f'response utf-8 "{ret_str}"')
-			return ret_str
-		
-	def clip_show(S,url):
-		running = False
-		while S.count_down > 0.0:
-			res = S.send_command("get_property", "time-pos" )
-			time.sleep(S.dt_check)
-			S.count_down -= S.dt_check
-			resdict = json.loads(res)
-			if resdict["error"] == "success":
-				running = True
-				continue
-			if ["error"] == "property unavailable":
-			
-			print (json.dumps(resdict,indent=4))
-			S.send_command('loadfile', url, 'replace')
-		return False,'testing'
-		
-class ExploreOrgStream:
-	url_base = "https://outbound-production.explore.org/stream-production-"
-	url_tail = "/.m3u8"
-
-	def __init__(S,displayer,streamdb,max_pick):
-		S.displayer  = displayer
-		S.streamdb   = streamdb
-		S.max_pick   = max_pick
-		#S.temp_list_current = len(ExploreOrgStream.temp_list)
-		
-	def url_str(S):
-		return S.url_base+ str(S.pick) + S.url_tail
+			#ic(ret_str)
+			try:
+				ret_json=json.loads(ret_str)
+				return ret_json
+			except JSONDecodeError as e:
+				print(f'{ret_str =}')
+				ic(e)
+			ret_list = '['+ ret_str.replace('\n',',') + ']'
+			ic(ret_list)
+			try:
+				ret = json.loads(ret_list)
+				ic(ret)
+				return ret
+			except JSONDecodeError as e:
+				print(f'{ret_str =}')
+				ic(e)
+			return {'json_loads_failed':ret_str}
 	
-	def pick_a_nice_stream(S):
-		#print ()
-		while True:
-			S.pick = random.randint(0,S.max_pick) + 1
-			#S.pick = S.pick_from_list()
-			print (f'[{S.pick:4} ',end='')
-			if S.streamdb.is_bad_boy(S.pick) == STORED_BAD:
-				print (f'BBOY] ',end='')
-				continue
-			#print(f'{S.pick=}')
-			S.url = S.url_str()
-			S.url_status = S.streamdb.url_status_lookup(S.url)
-			if S.url_status == STORED_BAD : # tested and bad, throw the dice agian
-				print(f'SBAD] ',end='')
-				continue
-			if args.only_tested and S.url_status == NOT_STORED:
-				print(f'NEW ] ',end='')
-				continue
-			if S.url_status == NOT_STORED:
-				print (f'NEW ] ',end='')
-				
-			else:
-				print (f'GOOD] ',end='')
-			return # working on merging an old list
+class MpvPlayer(Displayer):
 	
-	def run(S):
-		
-		while True:
-			S.pick_a_nice_stream()
-			#print(f'run shows "{S.url}" with {S.url_status=}')
-			ok,data = S.displayer.clip_show(S.url)
-			if ok:
-				if S.url_status == STORED_GOOD: # Was ok and still ok no action
-					continue
-				# new working stream put it in the db
-				S.streamdb.store_good_status(S.url,data)
-				continue
-			else:
-				if S.url_status == NOT_STORED:
-					S.streamdb.store_bad_status(S.url)
-					nap = random.random()*7
-					time.sleep(nap)
-					
-class MpvPlayer:
+	def __init__(S,monitor):
+		Displayer.__init__(S,monitor)
+		print (f'{S.options=}')
 	
-	def __init__(S,clip_length, patients_secs = .3):
-		print(f'MpvPlayer({clip_length=}, {patients_secs})')
-		S.patients_secs = patients_secs
-		S.clip_length   = clip_length
-		S.options = ["mpv"]
-		S.options += xscreensaver_window_options()
-		S.options += screen_mode_options()
-		
-		#print (f'{S.options=}')
-	
-	def socket(S):
+	def is_on_socket(S):
 		return False
 		
-	def clip_show(S,url:str):
-		"""
-		run mpv with the given url
-		:param url: an explore.org m3u8 url
-		:type url: str
-		:return: True is stream was displayed with success
-		:rtype: bool
-		"""
-		command = ' '.join(S.options + [url] )
+	def precent_error(S, e_txt):
+		if 'rror 403' in e_txt:
+			print('Error 403: Forbidden')
+			return
+	
+		for line in e_txt.split('\n'):
+			print(f'\t{line}')
+		
+	async def show_clip(S,url_dict):
+		
+		command = ' '.join(S.options + [url_dict['url']] )
 		print(f'command : {command}',end=' ')
-		mpv_proc = subprocess.Popen(S.options + [url],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+		mpv_proc = subprocess.Popen(S.options + [url_dict['url']],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
 		_patience = 0.0
 		_tik = S.patients_secs / 200
 		while _patience < S.patients_secs:
-			time.sleep(_tik)
+			await asyncio.sleep(_tik)
 			_patience += _tik
 			if mpv_proc.poll():
 				print(f'{mpv_proc.returncode} after {_patience} sec.')
 		
-		_count_down = S.clip_length - S.patients_secs
-		while _count_down > 0:
+		_count_up = 0.0
+		while _count_up < S.clip_length:
 			check = mpv_proc.poll()
 			if check:
 				# print(f'FAILED at {_count_down} error {check} code {mpv_proc.returncode}')
 				S.precent_error(mpv_proc.stderr.read())
+				url_dict['error']=mpv_proc.returncode
+				url_dict['error_text'] = mpv_proc.stderr.read()
+				url_dict['time'] =_count_up
 				mpv_proc.terminate()
-				return False,'Bad'
-			time.sleep(S.patients_secs)
-			_count_down -= S.patients_secs
-			
+				return url_dict
+			await asyncio.sleep(S.patients_secs)
+			_count_up += S.patients_secs
 		mpv_proc.terminate()
-		
-		stdout_txt = mpv_proc.stdout.read()
-		#print(f'clip_show("{url}")-> True,>>>>{stdout_txt}<<<<')
+		url_dict['error']=0
+		url_dict['data'] = mpv_proc.stdout.read()
+		url_dict['time'] =_count_up
 		print ("Success")
-		return True,stdout_txt
-	
-	def precent_error(S,e_txt):
-		if 'rror 403' in e_txt:
-			print ('Error 403: Forbidden')
-			return
-		for line in e_txt.split('\n'):
-			print(f'\t{line}')
-			
-		error_txt = e_txt.split('\n')
-		
+		return url_dict
 
+	async def preform(S):
+		print (f'{S.name =} end')
+	
 class ExploreOrgDb:
 
 	table = """
@@ -321,27 +403,73 @@ class ExploreOrgDb:
             time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );"""
 	
-	def __init__(S):
+	def __init__(S,max_pick):
 		S.createdb_if_needed()
 		S.bad_boys_set = set()
 		S.num_reg = re.compile(r'-(\d+)/\.')
 		S.old_bad_boys()
+		S.max_pick = max_pick
+	
+	def pick_random_url(S)->Clip:
+		while True:
+			pick = random.randint(0, S.max_pick) + 1
+			print(f'[{pick:4} ', end='')
+			if id in S.bad_boys_set:
+				print(' BBOY] ', end='')
+				continue
+			# print(f'{pick=}')
+			url = url_str(pick)
+			url_status = S.url_status_lookup(url)
+			if url_status == Clip.STORED_BAD:  # tested and bad, throw the dice agian
+				print(f'SBAD] ', end='')
+				continue
+			if args.only_tested and url_status == Clip.NOT_STORED:
+				print(f'NEW ] ', end='')
+				continue
+			print(f'{url_status}] ', end='')
+			return Clip(url,url_status)
 		
-	def store_good_status(S,url:str,data:str)->None:
-		"""
-		store a good status for a given url
-		:param url: a tested url that worked with mpv
-		:type url: text
-		:param data: output of mpv piped stdout
-		:type data: str
-		:return: None
-		:rtype: None
-		"""
-		si = MpvOutput(data)
-		if not si['valid']:
-			print (f'No valid mpv data')
-			si.show()
+	def assess(S,clip):
+		# if not url_dict:
+		# 	return
+		# print (f'ExploreOrgDb.assess')
+		# print(json.dumps(url_dict, indent=4))
+		# print (f'ExploreOrgDb.assess end')
+		# if 'time' in url_dict:
+		# 	if url_dict['time'] < 3.0:
+		# 		S.store_bad_status(url_dict['url'])
+		# 		return
+		# if url_dict['status'] == STORED_GOOD:
+		# 	return
+		# data = '{}'
+		# if 'data' in url_dict:
+		# 	data = url_dict['data']
+		# elif 'metadata' in url_dict:
+		# 	data = url_dict['metadata']
+		# print (f'assess data: {data}')
+		#
+		# S.store_good_status(url_dict['url'],data)
+		if clip.live_time() < 5.0:
+			S.store_bad_status(clip)
+			return
+		S.store_good_status(clip)
 		
+	def store_good_status(S,clip)->None:
+		
+		width=0
+		height=0
+		url = clip['url']
+		# if 'data' in clip:
+		# 	si = MpvOutput(clip['data'])
+		# 	if not si['valid']:
+		# 		print (f'No valid mpv data')
+		# 		si.show()
+		# 	else:
+		# 		width=si['scrw']
+		# 		height=si['scrh']
+		if 'data' in clip:
+			print(json.dumps(clip['data'], indent=4))
+			
 		try:
 			with sqlite3.connect(EXPLORE_ORG_DB) as con:
 				cur = con.cursor()
@@ -350,12 +478,11 @@ class ExploreOrgDb:
 					cur.execute("INSERT INTO streams VALUES (:url,:good,:width,:height,:time)",
 				            {'url':url
 					            ,'good':True
-					            ,'width':si['scrw']
-					            ,'height':si['scrh']
+					            ,'width':width
+					            ,'height':height
 					            ,'time':time.time()})
 				except KeyError as e :
-					si.show()
-					print(e)
+					ic(e)
 					raise
 				con.commit()
 		except sqlite3.IntegrityError as e:
@@ -364,15 +491,8 @@ class ExploreOrgDb:
 			else:
 				raise e
 
-	def store_bad_status(S,url:str)->None:
-		"""
-		store a bad status for a given url
-		:param url: a tested url that not worked with mpv
-		:type url: text
-		:return: None
-		:rtype: None
-		"""
-		
+	def store_bad_status(S,clip)->None:
+		url = clip['url']
 		with sqlite3.connect(EXPLORE_ORG_DB) as con:
 			cur = con.cursor()
 			try:
@@ -385,17 +505,17 @@ class ExploreOrgDb:
 				else:
 					raise e
 
-	def is_bad_boy(S,id):
-		if id in S.bad_boys_set:
-			return STORED_BAD
-		return NEED_LOOKUP
+	# def is_bad_boy(S,id):
+	# 	if id in S.bad_boys_set:
+	# 		return STORED_BAD
+	# 	return NEED_LOOKUP
 	
-	def url_status_lookup(S,url:str)->int:
+	def url_status_lookup(S,url)->int:
 		"""
 		Look the url up in the database store result in S.lookup
-		:param url: url to look up
-		:type url: str
-		:return: 0 = ok, 1 = bad, 2 = not checked not in the database jet
+		:param clip: with url to look up
+		:type clip: Clip
+		:return: a Clip STATUS
 		:rtype: int
 		"""
 		
@@ -404,10 +524,10 @@ class ExploreOrgDb:
 			cursor.execute("SELECT * FROM streams WHERE url=?", (url,))
 			row = cursor.fetchone()
 		if not row:
-			return NOT_STORED
+			return Clip.NOT_STORED
 		if row[1] == True: # the "good" field
-			return STORED_GOOD
-		return STORED_BAD
+			return Clip.STORED_GOOD
+		return Clip.STORED_BAD
 
 	def old_bad_boys(S):
 		#reg = re.compile(r'-(\d+)/\.')
@@ -448,31 +568,47 @@ class ExploreOrgDb:
 		cur.execute(ExploreOrgDb.table)
 		con.close()
 
-
-def main():
-	global CONFIG_DIR
+async def main():
 	#print (sys.argv)
-	if args.socket:
-		clip_displayer=SocketMpv(args.show_time)
-	else:
-		clip_displayer=MpvPlayer(args.show_time)
-	url_db = ExploreOrgDb()
-	
-	saver = ExploreOrgStream(clip_displayer,url_db,MAX_PICK)
-	saver.run()
+	url_db = ExploreOrgDb(MAX_PICK)
+	monitors = detect_monitors()
+	clip_showers=[]
+	for monitor in monitors:
+		clip_showers.append(SocketMpv(monitor,url_db) if args.socket else MpvPlayer(monitor,url_db))
+	preformers = [ m.preform() for m in clip_showers]
+	await asyncio.gather(*preformers)
+	print (f'main show END')
 	
 def socket_tester():
 	mpv_sock=SocketMpv()
 	mpv_sock.send_command("show-text", "Hello from Python!", "10000")
 	time.sleep(20)
 	print(f'bye from Socket tester')
+	exit(0)
+	
+def detect_monitors_tester():
+	monitors=detect_monitors()
+	for monitor in monitors:
+		print(monitor)
+		print(monitor.geomety_option())
+	exit(0)
 	
 if __name__ == '__main__':
 	# socket_tester()
-	# exit(0)
+	# detect_monitors_tester()
 	print(f'ExploreOrgScreenSaver pid({os.getpid()})')
+	# locker = '/tmp/ExploreOrgScreenSaver.lock'
+	# if os.path.isfile(locker):
+	# 	print(f'"{locker}" Exists.')
+	# 	print('please remove it first')
+	# 	while os.path.isfile(locker):
+	# 		time.sleep(10)
+	#
+	# with open(locker,'w') as lock:
+	# 	lock.write(f'{os.getpid()}\n')
+	# atexit.register(os.remove,locker)
 	try:
-		main()
+		asyncio.run(main())
 	except KeyboardInterrupt as e:
 		print(e)
 		print("\nScreensaver halted.")

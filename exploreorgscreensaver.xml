@@ -15,7 +15,7 @@
 
     <number id="showlength"
         type="spinbutton"
-        arg="--show-time %"
+        arg="--clip-length %"
         _label="Show time in seconds"
         low="20"
         high="6000"
@@ -43,6 +43,10 @@
     <boolean id="tested_question"
              _label="Use only tested streams"
              arg-set="--only-tested"
+    />
+    <boolean id="socket mpv"
+             _label="Run the mpv media player on a socket"
+             arg-set="--socket"
     />
 
 <!--
