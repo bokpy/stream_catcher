@@ -44,10 +44,12 @@
              _label="Use only tested streams"
              arg-set="--only-tested"
     />
+<!--
     <boolean id="socket mpv"
              _label="Run the mpv media player on a socket"
-             arg-set="--socket"
+             arg-set="-socket"
     />
+-->
 
 <!--
     <number id="count" type="slider" arg="- -count %"

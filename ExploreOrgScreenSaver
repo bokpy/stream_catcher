@@ -9,15 +9,15 @@ import random
 import time
 import re
 import sys
-#import glob
 import json
-from json import JSONDecodeError
+#from collections import deque
 import time
 import argparse
 import sqlite3
 import socket
 import asyncio
-import atexit
+#import atexit
+#import signal
 
 mpv_error={
  0 : "Success"
@@ -54,16 +54,23 @@ parser.add_argument('-t', '--clip-length',default=20.0,type=float,nargs='?',help
 parser.add_argument('-w', '--window-id', type=str, nargs='?', help="root window id passed by the xscreensaver")
 parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a stream "original","stretch" or "zoom"')
 parser.add_argument('-o', '--only-tested', action='store_true', help="Don't try to show untested streams")
-parser.add_argument('-s', '--socket', action='store_true', help="Use mpv as sever on a socket")
+#parser.add_argument('-s', '--socket', action='store_true', help="Use mpv as sever on a socket")
 
 args = parser.parse_args()
-
 CONFIG_DIR = os.path.expanduser("~/.config/stream_catcher/")
 EXPLORE_ORG_DB = CONFIG_DIR + 'explore.org.db'
 #COOKIES_FILE=CONFIG_DIR+ 'cookies.txt'
 #PATIENTS_SECS = .4
 #CLIP_LENGTH   = 20.0
-MAX_PICK = 1200
+MAX_PICK = 500
+
+ID_COUNT = 'A'
+def get_an_id():
+	global ID_COUNT
+	id=ID_COUNT
+	ID_COUNT = chr(ord(ID_COUNT)+1)
+	return id
+
 '''
 wmctrl -d
 
@@ -86,6 +93,29 @@ The rest of the line contains the name of the desktop (possibly containing multi
 '''
 # to find monitors xrandr
 
+class Explore:
+	num_reg = re.compile(r'-(\d+)/\.')
+	def __init__(S,url):
+		if isinstance(url,str):
+			S.string  = url
+			match = Explore.num_reg.findall(url)
+			if not match or not len(match):
+				ic(url)
+				exit(234)
+			S.integer = int(match[0])
+			return
+		S.string  = "https://outbound-production.explore.org/stream-production-" + str(url) + "/.m3u8"
+		S.integer = url
+	
+	def int_str(S):
+		return S.integer,S.string
+	
+	def __str__(S):
+		return S.string
+	
+	def __int__(S):
+		return S.integer
+	
 def url_str(pick):
 	return "https://outbound-production.explore.org/stream-production-" + str(pick) + "/.m3u8"
 	
@@ -116,18 +146,11 @@ def detect_monitors():
 	return detected
 
 class Clip(dict):
-	STORED_GOOD = 0
-	STORED_BAD  = 1
-	NOT_STORED  = 2
-	NEED_LOOKUP = 3
-
-	STATUS = ['STORED_GOOD', 'STORED_BAD ', 'NOT_STORED', 'NEED_LOOKUP']
-
-	def __init__(S,url,status):
+	
+	def __init__(S,tag):
 		dict.__init__(S)
-		S['url']=url
-		S['status']=status
-		S.birth = time.time()
+		S['tag'],S['url'] = Explore(tag).int_str()
+		S.birth = S['birth'] = time.time()
 		
 	def __str__(S):
 		return f'Clip("{S['url']}",{Clip.STATUS[S['status']]},{S.live_time(S):6.2f})'
@@ -143,6 +166,74 @@ class Clip(dict):
 			return False
 		if S['time'] < 5:
 			return False
+	
+	def extract_info(S):
+		'''
+		info = [{'data'      : [{'albumart'        : False,
+						  'codec'           : 'h264',
+						  'decoder-desc'    : 'H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10',
+						  'default'         : False,
+						  'demux-fps'       : 30.0,
+						  'demux-h'         : 1080,
+						  'demux-w'         : 1920,
+						  'dependent'       : False,
+						  'external'        : False,
+						  'ff-index'        : 0,
+						  'forced'          : False,
+						  'hearing-impaired': False,
+						  'id'              : 1,
+						  'image'           : False,
+						  'main-selection'  : 0,
+						  'program-id'      : 0,
+						  'selected'        : True,
+						  'type'            : 'video',
+						  'visual-impaired' : False},
+						 {'albumart'           : False,
+						  'audio-channels'     : 2,
+						  'codec'              : 'aac',
+						  'decoder-desc'       : 'AAC (Advanced Audio Coding)',
+						  'default'            : False,
+						  'demux-channel-count': 2,
+						  'demux-channels'     : 'stereo',
+						  'demux-samplerate'   : 44100,
+						  'dependent'          : False,
+						  'external'           : False,
+						  'ff-index'           : 1,
+						  'forced'             : False,
+						  'hearing-impaired'   : False,
+						  'id'                 : 1,
+						  'image'              : False,
+						  'main-selection'     : 0,
+						  'program-id'         : 0,
+						  'selected'           : True,
+						  'type'               : 'audio',
+						  'visual-impaired'    : False}],
+		  'error'     : 'success',
+		  'request_id': 16},
+		 {'event': 'audio-reconfig'},
+		 {'event': 'audio-reconfig'},
+		 {'event': 'file-loaded'}]
+		 '''
+		S['width'] = S['height'] = 0
+		if not 'data' in S:
+			return
+		
+		data = S['data']
+		video_track = audio_track = None
+		tracks = data[0]['data']
+		# ic(clip['data'][0])
+		# ic(clip['data'][0]['data'])
+		for track in tracks:
+			# ic(track)
+			if 'type' in track:
+				if track['type'] == 'video':
+					video_track = track
+				elif track['type'] == 'audio':
+					audio_track = track
+		
+		if video_track:
+			S['width']  = video_track['demux-w']
+			S['height'] = video_track['demux-h']
 
 class Monitor:
 	"""
@@ -163,42 +254,6 @@ class Monitor:
 	def __str__(S):
 		name = S.xrandr_line.split()[0]
 		return f'monitor "{name}" at [{S.x:4},{S.y:4}]-[{(S.x+S.w):4},{(S.y+S.h):4}]'
-	
-class MpvOutput(dict):
-	# (+) Video --vid=1 (h264 1920x1080 30.000fps)
-    # (+) Audio --aid=1 (aac 2ch 44100Hz)
-    #AO: [pipewire] 44100Hz stereo 2ch floatp
-    #VO: [gpu] 1920x1080 yuv420p
-
-	def __init__(S,txt):
-		dict.__init__(S)
-		val1 = val2 = False
-		lines=txt.split('\n')
-		for line in lines:
-			if not val1:
-				match = re.findall(r'Video [^(]+\((\S+) (\d\d\d*)x(\d\d\d*) ([\d.]*)',line)
-				if match:
-					val1 = True
-					item = match[0]
-					S['video_codec']=item[0]
-					S['scrw']= int(item[1])
-					S['scrh']= int(item[2])
-					S['fps'] = int(item[3].replace('.',''))
-			if not val2:
-				match = re.findall(r'Audio [^(]+\((\S+) (\d+)ch (\d+)Hz',line)
-				if match:
-					val2 = True
-					item = match[0]
-					S['audio_codec']    = item[0]
-					S['audio_channels'] = int(item[1])
-					S['sample_rate']    = int(item[2])
-			S['valid'] = val1 and val2
-			if S['valid']:
-				S.show()
-				return
-		
-	def show(S):
-		print(json.dumps(S,indent=4))
 
 class Displayer:
 	def __init__(S,monitor,url_db):
@@ -239,10 +294,38 @@ class Displayer:
 			"--geometry=50%x50%"
 			,'--length=10'
 			]
-			
-class SocketMpv(Displayer):
+		
+class MpvServer:
+	def __init__(S,path,options):
+		pass
+
+
+'''
+# ... inside your logic
+try:
+	with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+		# Set a 5-second timeout
+		client.settimeout(5.0)
+		client.connect(S.socket_path)
+		
+		payload_bytes = (json.dumps(payload) + '\n').encode('utf-8')
+		client.sendall(payload_bytes)
+		
+		# If the server is silent, this will now raise socket.timeout
+		# instead of hanging the entire script.
+		response = client.recv(4096)
+		print(f"Received: {response.decode('utf-8')}")
+
+except socket.timeout:
+	print("The server took too long to respond.")
+except Exception as e:
+	print(f"An error occurred: {e}")
+'''
+class MpvDisplayer(Displayer):
+	
 	# https://mpv.io/manual/stable/#json-ipc
-	def __init__(S,monitor,db):
+	def __init__(S,monitor,db,drHeart):
+		S.drHeart=drHeart
 		Displayer.__init__(S,monitor,db)
 		S.socket_path = '/tmp/mpv-socket-'+ S.name
 		print(f'{S.socket_path=}')
@@ -255,54 +338,77 @@ class SocketMpv(Displayer):
 		time.sleep(1)
 		S.dt_check = .8 # polling interval
 		S.request_id = 0
-		atexit.register(S.say_bye)
+		S.info_request_ids = set()
+		S.id = get_an_id()
+		# atexit.register(S.say_bye)
 		
 	async def preform(S):
 		on_display = None
-		
+		#poll_timer=5
 		while True:
-			if on_display and on_display.live_time() > args.clip_length:
-				print(f'To old {on_display.live_time():6.2f} sec')
+			S.drHeart.checkup(S.id)
 			res = S.send_command("get_property", "idle-active")
 			await asyncio.sleep(S.dt_check)
-			if isinstance(res,list):
-				ic(res)
-				continue
-			if 'data' in res:
-				if res["data"]:  # is idle
-					if on_display and on_display['status']==Clip.NOT_STORED:
-						S.db.assess(on_display)
-						await asyncio.sleep(1)
-					on_display = S.db.pick_random_url()
-					S.send_command('loadfile', on_display['url'], 'replace')
-					await asyncio.sleep(1)
+			start_next = False
+			if on_display and on_display.live_time() > args.clip_length:
+				start_next = True
+				print(f'To old {on_display.live_time():6.2f} sec')
+			#print(f'\nloop: {res=}')
+			for message in res:
+				#print(f'{message =}')
+				if "request_id" in message:
+					mes_id = message["request_id"]
+					if mes_id in S.info_request_ids:
+						S.info_request_ids.remove(mes_id)
+						print(f'request {mes_id} got:\n{json.dumps(message["data"],indent=4)}')
+						continue
+				else:
+					print(f'Messsage: {message} without "request_id"')
+					continue
+				if 'data' in message:
+					#print(f'{message['data'] = }')
+					if message['data'] :
+						start_next = True
+					continue
+				print (f'NO data message {message}')
+				
+			if start_next:
+				S.db.assess(on_display)
+				await asyncio.sleep(1)
+				on_display = S.db.pick_random_url()
+				S.send_command('loadfile', on_display['url'], 'replace')
+				await asyncio.sleep(1)
 				continue
 			if on_display and not 'data' in on_display:
 				S.ask_stream_info(on_display)
-			print (f'No data res "{res}"')
-			
+				
 	def ask_stream_info(S,clip):
 		tracks = S.send_command("get_property", "track-list")
-		ic(tracks)
-		vo = S.send_command("get_property", "current-vo")
-		ic(vo)
-		ao = S.send_command("get_property", "current-ao")
-		ic(ao)
-		metadata = S.send_command("get_property", "filtered-metadata")
-		ic(metadata)
-		clip['data'] = {'tracks':tracks,'vo':vo,'ao':ao,'metadata':metadata}
+		clip['data'] = tracks
+		S.info_request_ids.add(S.request_id)
+		#ic(tracks)
+		# vo = S.send_command("get_property", "current-vo")
+		# S.info_request_ids.add(S.request_id)
+		# ic(vo)
+		# ao = S.send_command("get_property", "current-ao")
+		# S.info_request_ids.add(S.request_id)
+		# ic(ao)
+		# metadata = S.send_command("get_property", "filtered-metadata")
+		# S.info_request_ids.add(S.request_id)
+		# ic(metadata)
+		# clip['data'] = {'tracks':tracks,'vo':vo,'ao':ao,'metadata':metadata}
 		
+	def process_reply(S,message,clip):
+		pass
+	
 	def say_bye(S):
-		print(f'SocketMpv({S.name}) says bye.' )
+		print(f'MpvDisplayer({S.name}) says bye.' )
 		if S.server_proc:
 			print ( f'close mpv process at "{S.socket_path}"')
 			S.server_proc.terminate()
 			os.remove(S.socket_path)
 		S.server_proc=None
 		
-	def is_on_socket(S):
-		return True
-	
 	def send_command(S, *args):
 		"""Formats and sends a JSON command to the mpv socket."""
 		if not os.path.exists(S.socket_path):
@@ -322,194 +428,171 @@ class SocketMpv(Displayer):
 			response = client.recv(4096)
 			ret_str=response.decode('utf-8').strip()
 			#ic(ret_str)
-			try:
-				ret_json=json.loads(ret_str)
-				return ret_json
-			except JSONDecodeError as e:
-				print(f'{ret_str =}')
-				ic(e)
 			ret_list = '['+ ret_str.replace('\n',',') + ']'
-			ic(ret_list)
+			#ic(ret_list)
 			try:
-				ret = json.loads(ret_list)
-				ic(ret)
-				return ret
-			except JSONDecodeError as e:
-				print(f'{ret_str =}')
-				ic(e)
-			return {'json_loads_failed':ret_str}
-	
-class MpvPlayer(Displayer):
-	
-	def __init__(S,monitor):
-		Displayer.__init__(S,monitor)
-		print (f'{S.options=}')
-	
-	def is_on_socket(S):
-		return False
-		
-	def precent_error(S, e_txt):
-		if 'rror 403' in e_txt:
-			print('Error 403: Forbidden')
-			return
-	
-		for line in e_txt.split('\n'):
-			print(f'\t{line}')
-		
-	async def show_clip(S,url_dict):
-		
-		command = ' '.join(S.options + [url_dict['url']] )
-		print(f'command : {command}',end=' ')
-		mpv_proc = subprocess.Popen(S.options + [url_dict['url']],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-		_patience = 0.0
-		_tik = S.patients_secs / 200
-		while _patience < S.patients_secs:
-			await asyncio.sleep(_tik)
-			_patience += _tik
-			if mpv_proc.poll():
-				print(f'{mpv_proc.returncode} after {_patience} sec.')
-		
-		_count_up = 0.0
-		while _count_up < S.clip_length:
-			check = mpv_proc.poll()
-			if check:
-				# print(f'FAILED at {_count_down} error {check} code {mpv_proc.returncode}')
-				S.precent_error(mpv_proc.stderr.read())
-				url_dict['error']=mpv_proc.returncode
-				url_dict['error_text'] = mpv_proc.stderr.read()
-				url_dict['time'] =_count_up
-				mpv_proc.terminate()
-				return url_dict
-			await asyncio.sleep(S.patients_secs)
-			_count_up += S.patients_secs
-		mpv_proc.terminate()
-		url_dict['error']=0
-		url_dict['data'] = mpv_proc.stdout.read()
-		url_dict['time'] =_count_up
-		print ("Success")
-		return url_dict
-
-	async def preform(S):
-		print (f'{S.name =} end')
-	
+				return json.loads(ret_list)
+			except json.JSONDecodeError as e:
+				print(e)
+				ic(ret_list)
+				raise
+				
 class ExploreOrgDb:
 
 	table = """
-        CREATE TABLE IF NOT EXISTS streams (
-            url    TEXT PRIMARY KEY,
-            good   INTEGER DEFAULT 1,
-            width  INTEGER DEFAULT 0,
-            height INTEGER DEFAULT 0,
-            time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );"""
+		CREATE TABLE IF NOT EXISTS streams (
+			url    TEXT PRIMARY KEY,
+			tag    INTEGER DEFAULT -1,
+			good   INTEGER DEFAULT 1,
+			width  INTEGER DEFAULT 0,
+			height INTEGER DEFAULT 0,
+			time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);"""
 	
-	def __init__(S,max_pick):
+	def __init__(S):
 		S.createdb_if_needed()
-		S.bad_boys_set = set()
-		S.num_reg = re.compile(r'-(\d+)/\.')
-		S.old_bad_boys()
-		S.max_pick = max_pick
+		S.fill_tombola()
+
+	def db_connect(S):
+		conn = sqlite3.connect(EXPLORE_ORG_DB)
+		cursor = conn.cursor()
+		return conn, cursor
 	
+	def get_max_tag(S):
+		try:
+			conn, cursor = S.db_connect()
+	
+			query = """
+			SELECT * FROM streams
+			WHERE good = 1
+			ORDER BY tag DESC
+			LIMIT 1;
+			"""
+			
+			cursor.execute(query)
+			record = cursor.fetchone()
+			
+			if record:
+				return list(record)[0]
+			else:
+				return "No records found matching the criteria."
+		
+		except sqlite3.Error as e:
+			ic(e)
+			return 100
+		finally:
+			if conn:
+				conn.close()
+		#
+		# # Usage
+		# database = 'your_database.db'
+		# result = get_highest_tag_record(database)
+		# print(result)
+	
+	def fill_tombola(S):
+		# reg = re.compile(r'-(\d+)/\.')
+		
+		tombola_set = set()
+		S.good_set = set()
+		S.bad_set = set()
+		
+		def make_set(value=True,field='good'):
+			ret_set = set()
+			with sqlite3.connect(EXPLORE_ORG_DB) as con:
+				cursor = con.cursor()
+				query=f"SELECT url FROM streams WHERE {field}=?"
+				try:
+					cursor.execute(query, (value,))
+					rows = cursor.fetchall()
+					#print(rows)
+				except sqlite3.OperationalError as e:
+					print(e)
+			
+			for url_tuple in rows:
+				url = url_tuple[0]
+				if not url:
+					continue
+				ret_set.add(Explore(url).__int__())
+			return ret_set
+		
+		tag_limit = S.get_max_tag() + 100
+		S.bad_set  = make_set(False)
+		S.tombola = [x for x in range(1,tag_limit) if x not in S.bad_set]
+		S.max_pick = len(S.tombola)-1
+		
 	def pick_random_url(S)->Clip:
+		
 		while True:
-			pick = random.randint(0, S.max_pick) + 1
-			print(f'[{pick:4} ', end='')
-			if id in S.bad_boys_set:
-				print(' BBOY] ', end='')
-				continue
-			# print(f'{pick=}')
-			url = url_str(pick)
-			url_status = S.url_status_lookup(url)
-			if url_status == Clip.STORED_BAD:  # tested and bad, throw the dice agian
-				print(f'SBAD] ', end='')
-				continue
-			if args.only_tested and url_status == Clip.NOT_STORED:
-				print(f'NEW ] ', end='')
-				continue
-			print(f'{url_status}] ', end='')
-			return Clip(url,url_status)
+			index = random.randint(0, S.max_pick)
+			return Clip(S.tombola[index])
 		
 	def assess(S,clip):
-		# if not url_dict:
-		# 	return
-		# print (f'ExploreOrgDb.assess')
-		# print(json.dumps(url_dict, indent=4))
-		# print (f'ExploreOrgDb.assess end')
-		# if 'time' in url_dict:
-		# 	if url_dict['time'] < 3.0:
-		# 		S.store_bad_status(url_dict['url'])
-		# 		return
-		# if url_dict['status'] == STORED_GOOD:
-		# 	return
-		# data = '{}'
-		# if 'data' in url_dict:
-		# 	data = url_dict['data']
-		# elif 'metadata' in url_dict:
-		# 	data = url_dict['metadata']
-		# print (f'assess data: {data}')
-		#
-		# S.store_good_status(url_dict['url'],data)
+		if not clip:
+			return
 		if clip.live_time() < 5.0:
 			S.store_bad_status(clip)
 			return
 		S.store_good_status(clip)
 		
 	def store_good_status(S,clip)->None:
+		# tag , url , good, width , heigh , time
+		clip.extract_info()
+		width  = clip['width']
+		height = clip['height']
+		now=time.time()
+		#def upsert_stream(db_path, url, tag):
+		# Connect to the SQLite database
+		conn = sqlite3.connect(EXPLORE_ORG_DB)
+		cursor = conn.cursor()
 		
-		width=0
-		height=0
-		url = clip['url']
-		# if 'data' in clip:
-		# 	si = MpvOutput(clip['data'])
-		# 	if not si['valid']:
-		# 		print (f'No valid mpv data')
-		# 		si.show()
-		# 	else:
-		# 		width=si['scrw']
-		# 		height=si['scrh']
-		if 'data' in clip:
-			print(json.dumps(clip['data'], indent=4))
-			
 		try:
-			with sqlite3.connect(EXPLORE_ORG_DB) as con:
-				cur = con.cursor()
-				try:
-					
-					cur.execute("INSERT INTO streams VALUES (:url,:good,:width,:height,:time)",
-				            {'url':url
-					            ,'good':True
-					            ,'width':width
-					            ,'height':height
-					            ,'time':time.time()})
-				except KeyError as e :
-					ic(e)
-					raise
-				con.commit()
-		except sqlite3.IntegrityError as e:
-			if "UNIQUE constraint failed" in str(e):
-				print("Skipping: This URL is already in the database.")
-			else:
-				raise e
+			# SQLite Upsert syntax (requires SQLite 3.24.0+)
+			# url must be defined as the PRIMARY KEY for this to work
+			sql = """
+			INSERT INTO streams (tag, url, good, width, height, time)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(url) DO UPDATE SET
+				tag = excluded.tag, good=excluded.good,  width=excluded.width, height=excluded.height, time=excluded.time;
+			"""
+			cursor.execute(sql, (clip['tag'],clip['url'],True,width,height,now))
+			conn.commit()
+			print(f"\n+{clip['tag']} ")
+		
+		except sqlite3.Error as e:
+			print(f"An error occurred: {e}")
+			conn.rollback()
+		
+		finally:
+			conn.close()
 
 	def store_bad_status(S,clip)->None:
-		url = clip['url']
-		with sqlite3.connect(EXPLORE_ORG_DB) as con:
-			cur = con.cursor()
-			try:
-				cur.execute("INSERT INTO streams VALUES (:url,:good,:width,:height,:time)"
-				            ,{'url':url,'good':False,'width':0,'height':0,'time':time.time()})
-				con.commit()
-			except sqlite3.IntegrityError as e:
-				if "UNIQUE constraint failed" in str(e):
-					print("Skipping: This URL is already in the database.")
-				else:
-					raise e
-
-	# def is_bad_boy(S,id):
-	# 	if id in S.bad_boys_set:
-	# 		return STORED_BAD
-	# 	return NEED_LOOKUP
-	
+		# tag , url , good, width , heigh , time
+		now=time.time()
+		#def upsert_stream(db_path, url, tag):
+		# Connect to the SQLite database
+		conn = sqlite3.connect(EXPLORE_ORG_DB)
+		cursor = conn.cursor()
+		
+		try:
+			# SQLite Upsert syntax (requires SQLite 3.24.0+)
+			# url must be defined as the PRIMARY KEY for this to work
+			sql = """
+			INSERT INTO streams (tag, url, good, time)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(url) DO UPDATE SET
+				tag = excluded.tag, good=excluded.good, time=excluded.time;
+			"""
+			cursor.execute(sql, (clip['tag'],clip['url'],False,now))
+			conn.commit()
+			print(f"\n-{clip['tag']}")
+		
+		except sqlite3.Error as e:
+			print(f"An error occurred: {e}")
+			conn.rollback()
+		
+		finally:
+			conn.close()
+		
 	def url_status_lookup(S,url)->int:
 		"""
 		Look the url up in the database store result in S.lookup
@@ -528,26 +611,6 @@ class ExploreOrgDb:
 		if row[1] == True: # the "good" field
 			return Clip.STORED_GOOD
 		return Clip.STORED_BAD
-
-	def old_bad_boys(S):
-		#reg = re.compile(r'-(\d+)/\.')
-		with sqlite3.connect(EXPLORE_ORG_DB) as con:
-			cursor = con.cursor()
-			try:
-				cursor.execute("SELECT url FROM streams WHERE good=?", (0,))
-				rows = cursor.fetchall()
-				#print(rows)
-			except sqlite3.OperationalError as e:
-				print(e)
-				
-		for url_tuple in rows:
-			url = url_tuple[0]
-			#print(f'{url=}')
-			match = S.num_reg.findall(url)
-			if match:
-				id = int(match[0])
-				S.bad_boys_set.add(id)
-		#print(S.bad_boys_set)
 		
 	def createdb_if_needed(S):
 		if not os.path.isdir(CONFIG_DIR):
@@ -567,20 +630,45 @@ class ExploreOrgDb:
 		cur = con.cursor()
 		cur.execute(ExploreOrgDb.table)
 		con.close()
-
+		
+class HeartbeatCheck:
+	def __init__(S,pulse):
+		S.pulse=pulse
+		S.clients = {}
+		
+	def checkup(S,name):
+		S.clients[name]=time.time()
+		
+	async def pacemaker(S):
+		while True:
+			now = time.time()
+			for name, last_seen in S.clients.items():
+				latency = now - last_seen
+				if latency > S.pulse:
+					print(f"CRITICAL: {name} is HANGING! (Last seen {latency:.2f}s ago)")
+				else:
+					print(f"{name}",end='')
+			await asyncio.sleep(2)
+			
 async def main():
-	#print (sys.argv)
-	url_db = ExploreOrgDb(MAX_PICK)
-	monitors = detect_monitors()
-	clip_showers=[]
-	for monitor in monitors:
-		clip_showers.append(SocketMpv(monitor,url_db) if args.socket else MpvPlayer(monitor,url_db))
-	preformers = [ m.preform() for m in clip_showers]
-	await asyncio.gather(*preformers)
-	print (f'main show END')
+	# main
+	url_db     = ExploreOrgDb()
+	drHeart    = HeartbeatCheck(4)
+	monitors   = detect_monitors()
+	tasks      = [MpvDisplayer(monitor,url_db,drHeart).preform() for monitor in monitors]
+	tasks.append(drHeart.pacemaker())
+	group = asyncio.gather(*tasks)
+	try:
+		await group
+	except Exception as e:
+		print(f'Task failure: {e}')
+		for task in tasks:
+			task.cancel()
+	await asyncio.sleep(2)
+	print (f'Clean END reached bye')
 	
 def socket_tester():
-	mpv_sock=SocketMpv()
+	mpv_sock=MpvDisplayer()
 	mpv_sock.send_command("show-text", "Hello from Python!", "10000")
 	time.sleep(20)
 	print(f'bye from Socket tester')
@@ -592,25 +680,61 @@ def detect_monitors_tester():
 		print(monitor)
 		print(monitor.geomety_option())
 	exit(0)
+
+def test_Explore():
+	print (f'test_Explore 23 {str(Explore(23))}')
+	exit(0)
+
+def update_tags(db_path):
+	# one time use kept as an example for personal use
+	# Connect to the SQLite database
+	ic(db_path)
+	conn = sqlite3.connect(db_path)
+	cursor = conn.cursor()
 	
+	try:
+		# Select the primary key (id) and the field used for logic (url)
+		cursor.execute("SELECT url FROM streams")
+		#rows = cursor.fetchall()
+		urls = [row[0] for row in cursor.fetchall()]
+		#ic(urls)
+		for url in urls:
+			if not url:
+				continue
+			nt = Explore(url)
+			new_tag = int(nt)
+			print(f'{new_tag} -> {url}')
+			new_tag = int(Explore(url))
+			# Update the specific record
+			cursor.execute(
+				"UPDATE streams SET tag = ? WHERE url = ?",
+				(new_tag, url)
+			)
+		
+		# Commit the changes to the database
+		conn.commit()
+		print("Database updated successfully.")
+	
+	except sqlite3.Error as e:
+		print(f"An error occurred: {e}")
+		conn.rollback()
+	
+	finally:
+		# Close the connection
+		conn.close()
+	exit(0)
+
 if __name__ == '__main__':
 	# socket_tester()
 	# detect_monitors_tester()
+	# test_Explore()
+	# update_tags(EXPLORE_ORG_DB)
 	print(f'ExploreOrgScreenSaver pid({os.getpid()})')
-	# locker = '/tmp/ExploreOrgScreenSaver.lock'
-	# if os.path.isfile(locker):
-	# 	print(f'"{locker}" Exists.')
-	# 	print('please remove it first')
-	# 	while os.path.isfile(locker):
-	# 		time.sleep(10)
 	#
-	# with open(locker,'w') as lock:
-	# 	lock.write(f'{os.getpid()}\n')
-	# atexit.register(os.remove,locker)
-	try:
-		asyncio.run(main())
-	except KeyboardInterrupt as e:
-		print(e)
-		print("\nScreensaver halted.")
-		sys.exit(0)
-		
+	# try:
+	# 	asyncio.run(main())
+	# except KeyboardInterrupt as e:
+	# 	print(e)
+	# 	print("\nScreensaver halted.")
+	# 	sys.exit(0)
+	asyncio.run(main())
