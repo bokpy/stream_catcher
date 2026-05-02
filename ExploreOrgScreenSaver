@@ -71,28 +71,6 @@ def get_an_id():
 	ID_COUNT = chr(ord(ID_COUNT)+1)
 	return id
 
-'''
-wmctrl -d
-
-0  - DG: 6880x1440  VP: N/A  WA: 0,0 6880x1440  cad
-1  * DG: 6880x1440  VP: 0,0  WA: 0,0 6880x1440  inet
-2  - DG: 6880x1440  VP: N/A  WA: 0,0 6880x1440  file
-
-List all desktops managed by the window manager.
-One line is output for each desktop, with the line broken up into space separated columns.
-
-The first column contains an integer desktop number.
-The second column contains a '*' character for the current desktop, otherwise it contains a '-' character.
-The next two columns contain the fixed string DG:
-	 and then the desktop geometry as '<width>x<height>' (e.g. '1280x1024').
-The following two columns contain the fixed string VP:
-	 and then the viewport position in the format '<y>,<y>' (e.g. '0,0').
-The next three columns after this contains the fixed string WA:
-	 and then two columns with the workarea geometry as 'X,Y and WxH' (e.g. '0,0 1280x998').
-The rest of the line contains the name of the desktop (possibly containing multiple spaces).
-'''
-# to find monitors xrandr
-
 class Explore:
 	num_reg = re.compile(r'-(\d+)/\.')
 	def __init__(S,url):
@@ -106,18 +84,15 @@ class Explore:
 			return
 		S.string  = "https://outbound-production.explore.org/stream-production-" + str(url) + "/.m3u8"
 		S.integer = url
-	
+
 	def int_str(S):
 		return S.integer,S.string
-	
+
 	def __str__(S):
 		return S.string
-	
+
 	def __int__(S):
 		return S.integer
-	
-def url_str(pick):
-	return "https://outbound-production.explore.org/stream-production-" + str(pick) + "/.m3u8"
 	
 def service_call(*args):
 	try:
@@ -130,42 +105,45 @@ def service_call(*args):
 	str_info = info.decode('utf-8')
 	return str_info.splitlines()
 	
-def detect_monitors():
+def get_monitor_geometries():
 	"""
-	use xrandr output to determine which monitors are conected and thier geometry
-	:return: list of class Monitor
-	:rtype: list[Monitor]
+	use xrandr to get the geometry of the connected monitors
+	HDMI-1 connected primary 3440x1440+0+0 (normal left inverted right x axis y axis) 797mm x 334mm
+	:return: list of str of form 3440x1440+0+0
+	:rtype: list[str]
 	"""
-#HDMI-1 connected primary 3440x1440+0+0 (normal left inverted right x axis y axis) 797mm x 334mm
 	detected = []
 	xrandr = service_call('xrandr')
 	for line in xrandr:
 		if ' connected ' in line:
 			print(f'{line}')
-			detected.append(Monitor(line))
+			match = re.findall(r'((\d+)x(\d+)\+(\d+)\+(\d+))',line)
+			detected.append(match[0][0])
 	return detected
 
 class Clip(dict):
 	
-	def __init__(S,tag):
+	def __init__(S,tag,signoff_fnc,url=None):
 		dict.__init__(S)
-		S['tag'],S['url'] = Explore(tag).int_str()
+		S.signoff_fnc=signoff_fnc
+		if url :
+			S['tag']=tag
+			S['url']=url
+		else:
+			S['tag'],S['url'] = Explore(tag).int_str()
 		S.birth = S['birth'] = time.time()
 		
-	def __str__(S):
-		return f'Clip("{S['url']}",{Clip.STATUS[S['status']]},{S.live_time(S):6.2f})'
+	def live_span(S):
+		if 'singoff' in S:
+			return S['singoff'] - S['birth']
+		return None
 	
-	def status_str(S):
-		return Clip.STATUS[S['status']]
-		
-	def live_time(S):
-		return time.time() - S.birth
+	def age(S):
+		return time.time() - S['birth']
 	
-	def evaluate(S):
-		if 'time' in S:
-			return False
-		if S['time'] < 5:
-			return False
+	def signoff(S):
+		S['singoff'] = time.time()
+		S.signoff_fnc(S)
 	
 	def extract_info(S):
 		'''
@@ -235,209 +213,145 @@ class Clip(dict):
 			S['width']  = video_track['demux-w']
 			S['height'] = video_track['demux-h']
 
-class Monitor:
-	"""
-	Holds the xrandr data of an active monitor
-	geometry and name
-	"""
-	def __init__(S,xrandr_line):
-		S.xrandr_line = xrandr_line
-		S.name=xrandr_line.split()[0]
-		match = re.findall(r'((\d+)x(\d+)\+(\d+)\+(\d+))',xrandr_line)
-		
-		S.geomety=match[0][0]
-		S.w = int(match[0][1])
-		S.h = int(match[0][2])
-		S.x = int(match[0][3])
-		S.y = int(match[0][4])
-		
-	def __str__(S):
-		name = S.xrandr_line.split()[0]
-		return f'monitor "{name}" at [{S.x:4},{S.y:4}]-[{(S.x+S.w):4},{(S.y+S.h):4}]'
+# class Monitor:
+# 	"""
+# 	Holds the xrandr data of an active monitor
+# 	geometry and name
+# 	"""
+# 	def __init__(S,xrandr_line):
+# 		S.xrandr_line = xrandr_line
+# 		S.name=xrandr_line.split()[0]
+# 		match = re.findall(r'((\d+)x(\d+)\+(\d+)\+(\d+))', xrandr_line)
+#
+# 		S.geometry=match[0][0]
+# 		S.w = int(match[0][1])
+# 		S.h = int(match[0][2])
+# 		S.x = int(match[0][3])
+# 		S.y = int(match[0][4])
+#
+# 	def Xgeo(S):
+# 		return S.geometry
+#
+# 	def __str__(S):
+# 		name = S.xrandr_line.split()[0]
+# 		return f'monitor "{name}" at [{S.x:4},{S.y:4}]-[{(S.x+S.w):4},{(S.y+S.h):4}]'
 
-class Displayer:
-	def __init__(S,monitor,url_db):
-		S.monitor = monitor
-		S.name = monitor.name
-		S.db = url_db
-		t = S.clip_length = args.clip_length
-		S.options = ['mpv']
-		S.add_screen_mode_options()
-		S.add_xscreensaver_options()
-		
-	def add_screen_mode_options(S):
-		if not args.mode:
-			return
-		if args.mode == 'original':
-			return
-		if args.mode == 'stretch':
-			S.options += ["--keepaspect=no"]
-			return
-		if args.mode == 'zoom':
-			S.options += ["--video-zoom=1", "--panscan=1.0"]
+class MpvSocketPlayer:
 	
-	def add_xscreensaver_options(S):
+	def __init__(S,Xgeo):
+		S.name = get_an_id()
+		print(f'MpvSocketPlayer({S.name},{Xgeo})')
+		S.socket_path = '/tmp/mpv-socket-' + S.name
+		print(f'{S.socket_path=}')
+		S.set_options(Xgeo)
+		S.server_proc = S.start_server()
+		
+		S.dt_check = .8  # polling interval
+		S.name += 'MSP-'+S.name
+		
+	def start_server(S):
+		subprocess.Popen(
+			S.options
+		#	+ [CONFIG_DIR + "intro.mp4"]
+			, stdout=subprocess.PIPE
+			, stderr=subprocess.STDOUT
+			)
+		time.sleep(1)
+		S.send_command("observe_property", 1, "idle-active")  # Example of a single track
+		# Or better, tell mpv to be quiet:
+		#{"command": ["set_property", "input-ipc-server", "yes"]}
+	
+	def set_options(S,Xgeo):
+		S.options=['mpv'
+			,'--input-ipc-server='+S.socket_path
+			, '--idle'
+		]
+		# screen mode options set by program arguments
+		if args.mode == 'original':
+			pass
+		elif args.mode == 'stretch':
+			S.options += ["--keepaspect=no"]
+		elif args.mode == 'zoom':
+			S.options += ["--video-zoom=1", "--panscan=1.0"]
+		# options if running as xscreensaver hack
 		if 'XSCREENSAVER_WINDOW' in os.environ:
 			wid = str(os.environ['XSCREENSAVER_WINDOW'])
-			S.options +=  [
-			'--wid='+ wid
-			,'-audio=no'
-			,"-quiet"
-			,"-hwdec=no"
-			,"--geometry=" + S.monitor.geomety
-			, '--length=' + str(int(args.clip_length))
-			#,"-really-quiet"
-			,"--fullscreen"
-			]
+			S.options += [
+				'--wid=' + wid
+				, '-audio=no'
+				, "-quiet"
+				, "-hwdec=no"
+				, "--geometry=" + Xgeo
+				, '--length=' + str(int(args.clip_length))
+				# ,"-really-quiet"
+				, "--fullscreen"]
 			return
 		S.options += [
 			"--geometry=50%x50%"
 			,'--length=10'
-			]
-		
-class MpvServer:
-	def __init__(S,path,options):
-		pass
+		]
 
-
-'''
-# ... inside your logic
-try:
-	with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-		# Set a 5-second timeout
-		client.settimeout(5.0)
-		client.connect(S.socket_path)
-		
-		payload_bytes = (json.dumps(payload) + '\n').encode('utf-8')
-		client.sendall(payload_bytes)
-		
-		# If the server is silent, this will now raise socket.timeout
-		# instead of hanging the entire script.
-		response = client.recv(4096)
-		print(f"Received: {response.decode('utf-8')}")
-
-except socket.timeout:
-	print("The server took too long to respond.")
-except Exception as e:
-	print(f"An error occurred: {e}")
-'''
-class MpvDisplayer(Displayer):
-	
-	# https://mpv.io/manual/stable/#json-ipc
-	def __init__(S,monitor,db,drHeart):
-		S.drHeart=drHeart
-		Displayer.__init__(S,monitor,db)
-		S.socket_path = '/tmp/mpv-socket-'+ S.name
-		print(f'{S.socket_path=}')
-		S.name += ' socket'
-		S.options += ['--input-ipc-server='+S.socket_path,'--idle']
-		S.server_proc = subprocess.Popen(
-			S.options + [CONFIG_DIR + "intro.mp4"],
-			stdout=subprocess.PIPE,stderr=subprocess.STDOUT
-		)
-		time.sleep(1)
-		S.dt_check = .8 # polling interval
-		S.request_id = 0
-		S.info_request_ids = set()
-		S.id = get_an_id()
-		# atexit.register(S.say_bye)
-		
-	async def preform(S):
-		on_display = None
-		#poll_timer=5
-		while True:
-			S.drHeart.checkup(S.id)
-			res = S.send_command("get_property", "idle-active")
-			await asyncio.sleep(S.dt_check)
-			start_next = False
-			if on_display and on_display.live_time() > args.clip_length:
-				start_next = True
-				print(f'To old {on_display.live_time():6.2f} sec')
-			#print(f'\nloop: {res=}')
-			for message in res:
-				#print(f'{message =}')
-				if "request_id" in message:
-					mes_id = message["request_id"]
-					if mes_id in S.info_request_ids:
-						S.info_request_ids.remove(mes_id)
-						print(f'request {mes_id} got:\n{json.dumps(message["data"],indent=4)}')
-						continue
-				else:
-					print(f'Messsage: {message} without "request_id"')
-					continue
-				if 'data' in message:
-					#print(f'{message['data'] = }')
-					if message['data'] :
-						start_next = True
-					continue
-				print (f'NO data message {message}')
-				
-			if start_next:
-				S.db.assess(on_display)
-				await asyncio.sleep(1)
-				on_display = S.db.pick_random_url()
-				S.send_command('loadfile', on_display['url'], 'replace')
-				await asyncio.sleep(1)
-				continue
-			if on_display and not 'data' in on_display:
-				S.ask_stream_info(on_display)
-				
-	def ask_stream_info(S,clip):
-		tracks = S.send_command("get_property", "track-list")
-		clip['data'] = tracks
-		S.info_request_ids.add(S.request_id)
-		#ic(tracks)
-		# vo = S.send_command("get_property", "current-vo")
-		# S.info_request_ids.add(S.request_id)
-		# ic(vo)
-		# ao = S.send_command("get_property", "current-ao")
-		# S.info_request_ids.add(S.request_id)
-		# ic(ao)
-		# metadata = S.send_command("get_property", "filtered-metadata")
-		# S.info_request_ids.add(S.request_id)
-		# ic(metadata)
-		# clip['data'] = {'tracks':tracks,'vo':vo,'ao':ao,'metadata':metadata}
-		
-	def process_reply(S,message,clip):
-		pass
-	
-	def say_bye(S):
-		print(f'MpvDisplayer({S.name}) says bye.' )
-		if S.server_proc:
-			print ( f'close mpv process at "{S.socket_path}"')
-			S.server_proc.terminate()
-			os.remove(S.socket_path)
-		S.server_proc=None
-		
-	def send_command(S, *args):
-		"""Formats and sends a JSON command to the mpv socket."""
+	def send_command(S,*args):
+		def jsonify_response(r):
+			s = r.decode('utf-8').strip()
+			r_list = '[' + s.replace('\n', ',') + ']'
+			try:
+				return json.loads(r_list)
+			except json.JSONDecodeError as e:
+				print(e)
+				ic(r_list)
+				raise
+			
 		if not os.path.exists(S.socket_path):
 			print(f"Error: Socket {S.socket_path} not found. Is mpv running?")
 			return None
 		
-		# Build the JSON payload
-		S.request_id += 1
-		payload = {"command": list(args), "request_id": S.request_id }
+		#S.request_id += 1
+		#payload = {"command": list(args), "request_id": S.request_id }
+		payload = {"command": list(args)}
+		try:
+			with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+				client.connect(S.socket_path)
+				client.settimeout(5.0)
+				payload_bytes = (json.dumps(payload) + '\n').encode('utf-8')
+				client.sendall(payload_bytes)
 		
-		# Connect to the Unix Domain Socket
-		with (socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client):
-			client.connect(S.socket_path)
-			client.sendall((json.dumps(payload) + '\n').encode('utf-8'))
+				# If the server is silent, this will now raise socket.timeout
+				# instead of hanging the entire script.
+				return jsonify_response(client.recv(4096))
 			
-			# Receive response (mpv sends a JSON response for every command)
-			response = client.recv(4096)
-			ret_str=response.decode('utf-8').strip()
-			#ic(ret_str)
-			ret_list = '['+ ret_str.replace('\n',',') + ']'
-			#ic(ret_list)
-			try:
-				return json.loads(ret_list)
-			except json.JSONDecodeError as e:
-				print(e)
-				ic(ret_list)
-				raise
-				
-class ExploreOrgDb:
+		except socket.timeout as e:
+			print(f"\nThe server {S.name} took too long to respond.")
+			ic(e)
+			return [{'error':'ExploreOrgScreenSaver.send_command() TimeoutError'}]
+		except Exception as e:
+			print(f"\nServer {S.name}: {e}")
+			ic(e)
+			raise
+			
+	
+		
+	async def display(S,q):
+		while True:
+			clip = await q.get()
+			S.send_command('loadfile', clip['url'], 'replace')
+			running=True
+			while running:
+				await asyncio.sleep(1.5)
+				rdl = S.send_command("get_property", "idle-active")
+				for rd in rdl:
+					if 'data' in rd:
+						running= not rd['data']
+						if (not 'data' in clip) and running:
+							S.ask_stream_info(clip)
+			q.task_done()
+			clip.signoff()
+			
+	def ask_stream_info(S,clip):
+		tracks = S.send_command("get_property", "track-list")
+		clip['data'] = tracks
+		
+class UrlProducer:
 
 	table = """
 		CREATE TABLE IF NOT EXISTS streams (
@@ -520,16 +434,20 @@ class ExploreOrgDb:
 		S.tombola = [x for x in range(1,tag_limit) if x not in S.bad_set]
 		S.max_pick = len(S.tombola)-1
 		
-	def pick_random_url(S)->Clip:
-		
+	async def fill_queue(S,q):
+		await q.put(Clip(-1,S.assess,CONFIG_DIR+'intro.mp4'))
 		while True:
+			if q.full():
+				await asyncio.sleep(2)
+				continue
 			index = random.randint(0, S.max_pick)
-			return Clip(S.tombola[index])
-		
+			clip=Clip(S.tombola[index],S.assess)
+			print(f'[Q{clip['tag']:04d}]',end='')
+			await q.put(clip)
+
 	def assess(S,clip):
-		if not clip:
-			return
-		if clip.live_time() < 5.0:
+		print(f'assess({clip["tag"]})')
+		if clip.age() < 5.0:
 			S.store_bad_status(clip)
 			return
 		S.store_good_status(clip)
@@ -628,59 +546,52 @@ class ExploreOrgDb:
 			print(e)
 			exit(1)
 		cur = con.cursor()
-		cur.execute(ExploreOrgDb.table)
+		cur.execute(UrlProducer.table)
 		con.close()
 		
-class HeartbeatCheck:
-	def __init__(S,pulse):
-		S.pulse=pulse
-		S.clients = {}
-		
-	def checkup(S,name):
-		S.clients[name]=time.time()
-		
-	async def pacemaker(S):
-		while True:
-			now = time.time()
-			for name, last_seen in S.clients.items():
-				latency = now - last_seen
-				if latency > S.pulse:
-					print(f"CRITICAL: {name} is HANGING! (Last seen {latency:.2f}s ago)")
-				else:
-					print(f"{name}",end='')
-			await asyncio.sleep(2)
-			
+# class HeartbeatCheck:
+# 	def __init__(S,pulse):
+# 		S.pulse=pulse
+# 		S.clients = {}
+#
+# 	def checkup(S,name):
+# 		S.clients[name]=time.time()
+#
+# 	async def pacemaker(S):
+# 		while True:
+# 			now = time.time()
+# 			for name, last_seen in S.clients.items():
+# 				latency = now - last_seen
+# 				if latency > S.pulse:
+# 					print(f"CRITICAL: {name} is HANGING! (Last seen {latency:.2f}s ago)")
+# 				else:
+# 					print(f"{name}",end='')
+# 			await asyncio.sleep(2)
+#
 async def main():
 	# main
-	url_db     = ExploreOrgDb()
-	drHeart    = HeartbeatCheck(4)
-	monitors   = detect_monitors()
-	tasks      = [MpvDisplayer(monitor,url_db,drHeart).preform() for monitor in monitors]
-	tasks.append(drHeart.pacemaker())
+	clip_queue   = asyncio.Queue(8)
+	urlproducer  = UrlProducer()
+	#drHeart      = HeartbeatCheck(4)
+	#monitorsXgeo = get_monitor_geometries()
+	tasks    = [MpvSocketPlayer(Xgeo).display(clip_queue)
+		for Xgeo in get_monitor_geometries()]
+	#tasks        = [MpvDisplayer(mpv_sock,drHeart).display(clip_queue) for mpv_sock in mpv_socks]
+	#tasks.append(drHeart.pacemaker())
+	tasks.append(urlproducer.fill_queue(clip_queue))
+	ic(tasks)
 	group = asyncio.gather(*tasks)
+	ic(group)
 	try:
 		await group
 	except Exception as e:
 		print(f'Task failure: {e}')
 		for task in tasks:
-			task.cancel()
+			#print(f'{dir(task)}')
+			task.close()
 	await asyncio.sleep(2)
 	print (f'Clean END reached bye')
 	
-def socket_tester():
-	mpv_sock=MpvDisplayer()
-	mpv_sock.send_command("show-text", "Hello from Python!", "10000")
-	time.sleep(20)
-	print(f'bye from Socket tester')
-	exit(0)
-	
-def detect_monitors_tester():
-	monitors=detect_monitors()
-	for monitor in monitors:
-		print(monitor)
-		print(monitor.geomety_option())
-	exit(0)
-
 def test_Explore():
 	print (f'test_Explore 23 {str(Explore(23))}')
 	exit(0)
