@@ -16,6 +16,9 @@ import argparse
 import sqlite3
 import socket
 import asyncio
+
+import atexit
+
 #import atexit
 #import signal
 
@@ -54,21 +57,19 @@ parser.add_argument('-t', '--clip-length',default=20.0,type=float,nargs='?',help
 parser.add_argument('-w', '--window-id', type=str, nargs='?', help="root window id passed by the xscreensaver")
 parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a stream "original","stretch" or "zoom"')
 parser.add_argument('-o', '--only-tested', action='store_true', help="Don't try to show untested streams")
-#parser.add_argument('-s', '--socket', action='store_true', help="Use mpv as sever on a socket")
+#parser.add_argument('-l', '--loud', nargs='?' ,action='store_true', help="Produce debug output.")
 
 args = parser.parse_args()
 CONFIG_DIR = os.path.expanduser("~/.config/stream_catcher/")
 EXPLORE_ORG_DB = CONFIG_DIR + 'explore.org.db'
-#COOKIES_FILE=CONFIG_DIR+ 'cookies.txt'
-#PATIENTS_SECS = .4
-#CLIP_LENGTH   = 20.0
 MAX_PICK = 500
-
-ID_COUNT = 'A'
+IS_HACK='XSCREENSAVER_WINDOW' in os.environ
+NEXT_ID = 'A'
+	
 def get_an_id():
-	global ID_COUNT
-	id=ID_COUNT
-	ID_COUNT = chr(ord(ID_COUNT)+1)
+	global NEXT_ID
+	id=NEXT_ID
+	NEXT_ID = chr(ord(NEXT_ID)+1)
 	return id
 
 class Explore:
@@ -76,6 +77,9 @@ class Explore:
 	def __init__(S,url):
 		if isinstance(url,str):
 			S.string  = url
+			if 'intro.' in url:
+				S.integer = -1
+				return
 			match = Explore.num_reg.findall(url)
 			if not match or not len(match):
 				ic(url)
@@ -104,46 +108,76 @@ def service_call(*args):
 		return None
 	str_info = info.decode('utf-8')
 	return str_info.splitlines()
-	
-def get_monitor_geometries():
+
+def get_monitor_geometries(divw=0,divh=0):
 	"""
 	use xrandr to get the geometry of the connected monitors
 	HDMI-1 connected primary 3440x1440+0+0 (normal left inverted right x axis y axis) 797mm x 334mm
 	:return: list of str of form 3440x1440+0+0
 	:rtype: list[str]
 	"""
+	
+	def devide(dw, dh,width, heigth):
+		width, heigth = int(width), int(heigth)
+		div_width  = width  // dw
+		div_heigth = heigth // dh
+		res = []
+		for i in range(0, dw):
+			for j in range(0, dh):
+				t = (div_width, div_heigth, i * div_width, j * div_heigth)
+				res.append(t)
+		r = [str(x[0]) + 'x' + str(x[1]) + '+' + str(x[2]) + '+' + str(x[3]) for x in res]
+		return r
+	
 	detected = []
 	xrandr = service_call('xrandr')
 	for line in xrandr:
 		if ' connected ' in line:
 			print(f'{line}')
-			match = re.findall(r'((\d+)x(\d+)\+(\d+)\+(\d+))',line)
+			match = re.findall(r'((\d+)x(\d+)\+(\d+)\+(\d+))', line)
 			detected.append(match[0][0])
-	return detected
+	if divw == 0 and divh == 0:
+		return detected
+	if divw == 0:
+		divw = 1
+	elif divh == 0:
+		divh = 1
+	return devide(divw, divh, match[0][1], match[0][2])
+	
+# def test_reply_for_value(reply, value):
+# 	#print(f'test_reply_for_value({type(reply)=}, {type(value)=})')
+# 	for dct in reply:
+# 		for key, val in dct.items():
+# 			if val == value:
+# 				print(f"{key}: {val} hit")
+# 				return True
+# 	return False
 
 class Clip(dict):
 	
-	def __init__(S,tag,signoff_fnc,url=None):
+	def __init__(S,tag,url=None):
 		dict.__init__(S)
-		S.signoff_fnc=signoff_fnc
 		if url :
 			S['tag']=tag
 			S['url']=url
 		else:
 			S['tag'],S['url'] = Explore(tag).int_str()
-		S.birth = S['birth'] = time.time()
+
+	def clock_in(S):
+		S['clock_in'] = time.time()
 		
-	def live_span(S):
-		if 'singoff' in S:
-			return S['singoff'] - S['birth']
-		return None
+	def clock_out(S):
+		S['clock_out'] = time.time()
+		
+	def work_time(S):
+		if ( not 'clock_in' in S ) or (not 'clock_out' in S):
+			return 0
+		return S['clock_out'] - S['clock_in']
 	
-	def age(S):
-		return time.time() - S['birth']
-	
-	def signoff(S):
-		S['singoff'] = time.time()
-		S.signoff_fnc(S)
+	def stint(S):
+		if not 'clock_in' in S:
+			return 0
+		return time.time() - S['clock_in']
 	
 	def extract_info(S):
 		'''
@@ -192,74 +226,132 @@ class Clip(dict):
 		 {'event': 'audio-reconfig'},
 		 {'event': 'file-loaded'}]
 		 '''
+		
 		S['width'] = S['height'] = 0
 		if not 'data' in S:
 			return
+		if len(S['data']) == 0:
+			print(f'Clip {S["tag"]} empty data')
+			return
+			
+		JDUMP('<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<',S['data'])
+		while S['width'] == 0:
+			for track in S['data']['data']:
+				print(f'{track=}')
+				S['width']  = track.get('demux-w',0)
+				S['height'] = track.get('demux-h',0)
+				if S['width']:
+					break
+		print (f"{S['width']=}x{S['height']=} >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 		
-		data = S['data']
-		video_track = audio_track = None
-		tracks = data[0]['data']
-		# ic(clip['data'][0])
-		# ic(clip['data'][0]['data'])
-		for track in tracks:
-			# ic(track)
-			if 'type' in track:
-				if track['type'] == 'video':
-					video_track = track
-				elif track['type'] == 'audio':
-					audio_track = track
+async def aio_command(socket_path,responce_test, *args):
+	# 1. Establish the async connection
+	reader, writer = await asyncio.open_unix_connection(socket_path)
+	
+	try:
+		# 2. Prepare and send the command
+		command = {"command": list(args), "request_id": 100}
+		writer.write((json.dumps(command) + "\n").encode())
+		await writer.drain()  # Ensure the data is sent
 		
-		if video_track:
-			S['width']  = video_track['demux-w']
-			S['height'] = video_track['demux-h']
+		# 3. Read the stream asynchronously
+		while True:
+			# This line does not block the entire program
+			line_bytes = await reader.readline()
+			if not line_bytes:
+				break
+			
+			data = json.loads(line_bytes.decode())
+			# ic(data)
+			#
+			# Handle the response logic
+			if data.get("request_id") == 100:
+				if data.get("error") != "success":
+					print(f"Error: {data['error']}")
+					return False
+			
+			if data.get("event") == responce_test:
+				print(f'Success event:"{responce_test}"')
+				return True
+			
+			if data.get("event") == "end-file" and data.get("reason") == "error":
+				print(f'Failed: "{responce_test}"')
+				return False
+	
+	finally:
+		writer.close()
+		await writer.wait_closed()
 
-# class Monitor:
-# 	"""
-# 	Holds the xrandr data of an active monitor
-# 	geometry and name
-# 	"""
-# 	def __init__(S,xrandr_line):
-# 		S.xrandr_line = xrandr_line
-# 		S.name=xrandr_line.split()[0]
-# 		match = re.findall(r'((\d+)x(\d+)\+(\d+)\+(\d+))', xrandr_line)
-#
-# 		S.geometry=match[0][0]
-# 		S.w = int(match[0][1])
-# 		S.h = int(match[0][2])
-# 		S.x = int(match[0][3])
-# 		S.y = int(match[0][4])
-#
-# 	def Xgeo(S):
-# 		return S.geometry
-#
-# 	def __str__(S):
-# 		name = S.xrandr_line.split()[0]
-# 		return f'monitor "{name}" at [{S.x:4},{S.y:4}]-[{(S.x+S.w):4},{(S.y+S.h):4}]'
+async def aio_data_request(socket_path,*args):
+	# 1. Establish the async connection
+	reader, writer = await asyncio.open_unix_connection(socket_path)
+	
+	try:
+		# 2. Prepare and send the command
+		command = {"command": list(args), "request_id": 12}
+		writer.write((json.dumps(command) + "\n").encode())
+		await writer.drain()  # Ensure the data is sent
+		
+		# 3. Read the stream asynchronously
+		while True:
+			# This line does not block the entire program
+			line_bytes = await reader.readline()
+			if not line_bytes:
+				break
+			
+			data = json.loads(line_bytes.decode())
+			#ic(list(args),data)
+			
+			# Handle the response logic
+			if data.get("request_id") == 12:
+				if data.get("error") != "success":
+					print(f"Error: {data['error']}")
+					return None
+				return data
+			
+			# if data.get("event") == responce_test:
+			# 	print(f'Success event:"{responce_test}"')
+			# 	return True
+			#
+			# if data.get("event") == "end-file" and data.get("reason") == "error":
+			# 	print(f'Failed: "{responce_test}"')
+			# 	return False
+	
+	finally:
+		writer.close()
+		await writer.wait_closed()
 
+# To run the async function:
+# asyncio.run(monitor_mpv_async('/tmp/mpvsocket', 'https://example.com/video.mp4'))
 class MpvSocketPlayer:
 	
 	def __init__(S,Xgeo):
-		S.name = get_an_id()
-		print(f'MpvSocketPlayer({S.name},{Xgeo})')
-		S.socket_path = '/tmp/mpv-socket-' + S.name
+		S.id = get_an_id()
+		print(f'MpvSocketPlayer({S.id},{Xgeo})')
+		S.socket_path = '/tmp/mpv-socket-' + S.id
 		print(f'{S.socket_path=}')
 		S.set_options(Xgeo)
 		S.server_proc = S.start_server()
-		
 		S.dt_check = .8  # polling interval
-		S.name += 'MSP-'+S.name
+		S.name = 'MSP-'+S.id
+		atexit.register(S.kill_me)
 		
 	def start_server(S):
-		subprocess.Popen(
+		proc = subprocess.Popen(
 			S.options
-		#	+ [CONFIG_DIR + "intro.mp4"]
-			, stdout=subprocess.PIPE
-			, stderr=subprocess.STDOUT
+			, stdin =subprocess.DEVNULL
+			, stdout=subprocess.DEVNULL
+			, stderr=subprocess.DEVNULL
 			)
 		time.sleep(1)
-		S.send_command("observe_property", 1, "idle-active")  # Example of a single track
-		# Or better, tell mpv to be quiet:
-		#{"command": ["set_property", "input-ipc-server", "yes"]}
+		return proc
+	
+	def kill_me(S):
+		if S.server_proc:
+			S.server_proc.terminate()
+			print(f'{S.name} terminated')
+			time.sleep(1)
+			S.server_proc=None
 	
 	def set_options(S,Xgeo):
 		S.options=['mpv'
@@ -274,7 +366,7 @@ class MpvSocketPlayer:
 		elif args.mode == 'zoom':
 			S.options += ["--video-zoom=1", "--panscan=1.0"]
 		# options if running as xscreensaver hack
-		if 'XSCREENSAVER_WINDOW' in os.environ:
+		if IS_HACK:
 			wid = str(os.environ['XSCREENSAVER_WINDOW'])
 			S.options += [
 				'--wid=' + wid
@@ -282,75 +374,137 @@ class MpvSocketPlayer:
 				, "-quiet"
 				, "-hwdec=no"
 				, "--geometry=" + Xgeo
-				, '--length=' + str(int(args.clip_length))
+				#, '--length=' + str(int(args.clip_length))
 				# ,"-really-quiet"
 				, "--fullscreen"]
 			return
 		S.options += [
-			"--geometry=50%x50%"
-			,'--length=10'
+			"--keepaspect=no"
+			, "--geometry=" + Xgeo
+			#"--geometry=50%x50%"
+			#,'--length=10'
 		]
 
-	def send_command(S,*args):
-		def jsonify_response(r):
-			s = r.decode('utf-8').strip()
-			r_list = '[' + s.replace('\n', ',') + ']'
-			try:
-				return json.loads(r_list)
-			except json.JSONDecodeError as e:
-				print(e)
-				ic(r_list)
-				raise
+	# def send_command(S,*args):
+	# 	def jsonify_response(r):
+	# 		s = r.decode('utf-8').strip()
+	# 		r_list = '[' + s.replace('\n', ',') + ']'
+	# 		try:
+	# 			return json.loads(r_list)
+	# 		except json.JSONDecodeError as e:
+	# 			print(e)
+	# 			ic(r_list)
+	# 			raise
+	#
+	# 	if not os.path.exists(S.socket_path):
+	# 		print(f"Error: Socket {S.socket_path} not found. Is mpv running?")
+	# 		return None
+	#
+	# 	#S.request_id += 1
+	# 	payload = {"command": list(args), "request_id": ord(S.id) }
+	# 	#payload = {"command": list(args)}
+	# 	try:
+	# 		with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+	# 			client.connect(S.socket_path)
+	# 			client.settimeout(15.0)
+	# 			payload_bytes = (json.dumps(payload) + '\n').encode('utf-8')
+	# 			client.sendall(payload_bytes)
+	#
+	# 			# If the server is silent, this will now raise socket.timeout
+	# 			# instead of hanging the entire script.
+	# 			return jsonify_response(client.recv(4096))
+	#
+	# 	except socket.timeout as e:
+	# 		print(f"\nThe server {S.name} took too long to respond.")
+	# 		ic(e)
+	# 		return [{'error':'ExploreOrgScreenSaver.send_command() TimeoutError'}]
+	# 	except ConnectionRefusedError as e:
+	# 		print(f"\nThe server {S.name} lost connection.")
+	# 		raise
+	# 	except Exception as e:
+	# 		print(f"\nServer {S.name}: {e}")
+	# 		ic(e)
+	#		raise
 			
-		if not os.path.exists(S.socket_path):
-			print(f"Error: Socket {S.socket_path} not found. Is mpv running?")
-			return None
+	# async def display(S,q):
+	# 	while True:
+	# 		try:
+	# 			clip = await q.get()
+	# 			print(f'\n{S.name} loadfile[{clip["tag"]}]')
+	# 			start = await aio_command(S.socket_path,'loadfile', clip['url'], 'replace')
+	# 			ic(start)
+	# 			#await asyncio.sleep(random.random()*2.0) # await asyncio.sleep(1.5)
+	# 			clip.clock_in()
+	# 			while clip.stint() < args.clip_length:
+	# 				await asyncio.sleep(2.2)
+	# 				rdl = S.send_command("get_property", "idle-active")
+	# 				print(f'{S.name} {json.dumps(rdl,indent=4)}')
+	# 				for rd in rdl:
+	# 					if 'data' in rd:
+	# 						print(f'{S.id}',end='')
+	# 						if rd['data']:
+	# 							# mpv is idle so the clip is not running long enough
+	# 							break
+	# 						elif not 'data' in clip:
+	# 							print( f'{S.name} collect info')
+	# 							S.ask_stream_info(clip)
+	# 			clip.clock_out()
+	# 			print(f'{S.name} replace [{clip["tag"]}] after {clip.work_time():6.2f}s')
+	# 			q.task_done()
+	# 			await assess(clip)
+	# 		except RuntimeError as e:
+	# 			await debug_tasks()
+	# 			exit(666)
+	# 		except Exception as e:
+	# 			ic(e)
+	# 			exit(666)
+	#
+	# def get_property(S,property):
+	# 	return S.send_command("get_property", property)
+	#
+	async def ask_stream_info(S,clip):
+		info = await aio_data_request(S.socket_path,"get_property", "track-list")
+		if info:
+			clip['data'] = info
 		
-		#S.request_id += 1
-		#payload = {"command": list(args), "request_id": S.request_id }
-		payload = {"command": list(args)}
-		try:
-			with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-				client.connect(S.socket_path)
-				client.settimeout(5.0)
-				payload_bytes = (json.dumps(payload) + '\n').encode('utf-8')
-				client.sendall(payload_bytes)
-		
-				# If the server is silent, this will now raise socket.timeout
-				# instead of hanging the entire script.
-				return jsonify_response(client.recv(4096))
-			
-		except socket.timeout as e:
-			print(f"\nThe server {S.name} took too long to respond.")
-			ic(e)
-			return [{'error':'ExploreOrgScreenSaver.send_command() TimeoutError'}]
-		except Exception as e:
-			print(f"\nServer {S.name}: {e}")
-			ic(e)
-			raise
-			
-	
-		
-	async def display(S,q):
+	async def display(S, q):
 		while True:
-			clip = await q.get()
-			S.send_command('loadfile', clip['url'], 'replace')
-			running=True
-			while running:
-				await asyncio.sleep(1.5)
-				rdl = S.send_command("get_property", "idle-active")
-				for rd in rdl:
-					if 'data' in rd:
-						running= not rd['data']
-						if (not 'data' in clip) and running:
-							S.ask_stream_info(clip)
-			q.task_done()
-			clip.signoff()
+			try:
+				while True:
+					clip = await q.get()
+					print(f'{S.name} display_once [{clip["tag"]}]')
+					start = await aio_command(S.socket_path,"start-file",'loadfile', clip['url'], 'replace')
+					if start: # clip is on display
+						break
+					q.task_done()
+					await assess(clip)
+			except Exception as e:
+				ic(e)
+				raise
+			try:
+				clip.clock_in()
+				
+				while clip.stint() < args.clip_length:
+					status = await aio_data_request(S.socket_path,"get_property", "idle-active")
+					print(f'{S.id}->{status}')
+					if (status == None) or status.get('data'):
+						break
+					await asyncio.sleep(2.2)
+					if not 'data' in clip:
+						await S.ask_stream_info(clip)
+				clip.clock_out()
+				q.task_done()
+				await assess(clip)
+			except RuntimeError as e:
+				await debug_tasks()
+				exit(124)
+			except Exception as e:
+				ic(e)
+				exit(434)
 			
-	def ask_stream_info(S,clip):
-		tracks = S.send_command("get_property", "track-list")
-		clip['data'] = tracks
-		
+def JDUMP(name,jsn):
+	print(f'{name} {json.dumps(jsn,indent=4)}')
+
 class UrlProducer:
 
 	table = """
@@ -397,18 +551,12 @@ class UrlProducer:
 		finally:
 			if conn:
 				conn.close()
-		#
-		# # Usage
-		# database = 'your_database.db'
-		# result = get_highest_tag_record(database)
-		# print(result)
 	
 	def fill_tombola(S):
 		# reg = re.compile(r'-(\d+)/\.')
 		
-		tombola_set = set()
 		S.good_set = set()
-		S.bad_set = set()
+		S.bad_set  = set()
 		
 		def make_set(value=True,field='good'):
 			ret_set = set()
@@ -429,107 +577,22 @@ class UrlProducer:
 				ret_set.add(Explore(url).__int__())
 			return ret_set
 		
-		tag_limit = S.get_max_tag() + 100
+		tag_limit  = S.get_max_tag() + 100
 		S.bad_set  = make_set(False)
-		S.tombola = [x for x in range(1,tag_limit) if x not in S.bad_set]
+		S.tombola  = [x for x in range(1,tag_limit) if x not in S.bad_set]
 		S.max_pick = len(S.tombola)-1
 		
 	async def fill_queue(S,q):
-		await q.put(Clip(-1,S.assess,CONFIG_DIR+'intro.mp4'))
+		await q.put(Clip(-1,CONFIG_DIR+'intro.mp4'))
 		while True:
 			if q.full():
 				await asyncio.sleep(2)
 				continue
 			index = random.randint(0, S.max_pick)
-			clip=Clip(S.tombola[index],S.assess)
+			clip=Clip(S.tombola[index])
 			print(f'[Q{clip['tag']:04d}]',end='')
 			await q.put(clip)
-
-	def assess(S,clip):
-		print(f'assess({clip["tag"]})')
-		if clip.age() < 5.0:
-			S.store_bad_status(clip)
-			return
-		S.store_good_status(clip)
-		
-	def store_good_status(S,clip)->None:
-		# tag , url , good, width , heigh , time
-		clip.extract_info()
-		width  = clip['width']
-		height = clip['height']
-		now=time.time()
-		#def upsert_stream(db_path, url, tag):
-		# Connect to the SQLite database
-		conn = sqlite3.connect(EXPLORE_ORG_DB)
-		cursor = conn.cursor()
-		
-		try:
-			# SQLite Upsert syntax (requires SQLite 3.24.0+)
-			# url must be defined as the PRIMARY KEY for this to work
-			sql = """
-			INSERT INTO streams (tag, url, good, width, height, time)
-			VALUES (?, ?, ?, ?, ?, ?)
-			ON CONFLICT(url) DO UPDATE SET
-				tag = excluded.tag, good=excluded.good,  width=excluded.width, height=excluded.height, time=excluded.time;
-			"""
-			cursor.execute(sql, (clip['tag'],clip['url'],True,width,height,now))
-			conn.commit()
-			print(f"\n+{clip['tag']} ")
-		
-		except sqlite3.Error as e:
-			print(f"An error occurred: {e}")
-			conn.rollback()
-		
-		finally:
-			conn.close()
-
-	def store_bad_status(S,clip)->None:
-		# tag , url , good, width , heigh , time
-		now=time.time()
-		#def upsert_stream(db_path, url, tag):
-		# Connect to the SQLite database
-		conn = sqlite3.connect(EXPLORE_ORG_DB)
-		cursor = conn.cursor()
-		
-		try:
-			# SQLite Upsert syntax (requires SQLite 3.24.0+)
-			# url must be defined as the PRIMARY KEY for this to work
-			sql = """
-			INSERT INTO streams (tag, url, good, time)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(url) DO UPDATE SET
-				tag = excluded.tag, good=excluded.good, time=excluded.time;
-			"""
-			cursor.execute(sql, (clip['tag'],clip['url'],False,now))
-			conn.commit()
-			print(f"\n-{clip['tag']}")
-		
-		except sqlite3.Error as e:
-			print(f"An error occurred: {e}")
-			conn.rollback()
-		
-		finally:
-			conn.close()
-		
-	def url_status_lookup(S,url)->int:
-		"""
-		Look the url up in the database store result in S.lookup
-		:param clip: with url to look up
-		:type clip: Clip
-		:return: a Clip STATUS
-		:rtype: int
-		"""
-		
-		with sqlite3.connect(EXPLORE_ORG_DB) as conn:
-			cursor = conn.cursor()
-			cursor.execute("SELECT * FROM streams WHERE url=?", (url,))
-			row = cursor.fetchone()
-		if not row:
-			return Clip.NOT_STORED
-		if row[1] == True: # the "good" field
-			return Clip.STORED_GOOD
-		return Clip.STORED_BAD
-		
+	
 	def createdb_if_needed(S):
 		if not os.path.isdir(CONFIG_DIR):
 			try:
@@ -548,40 +611,104 @@ class UrlProducer:
 		cur = con.cursor()
 		cur.execute(UrlProducer.table)
 		con.close()
+
+async def assess(clip):
+	print(f'assess({clip["tag"]} {clip.work_time():6.2f}sec )',end='')
+	if clip.work_time() <  0.3 * args.clip_length:
+		print( 'bad')
+		store_bad_status(clip)
+		return
+	print('good')
+	store_good_status(clip)
+
+# async def assess(clip):
+# 	print(f'assess({clip["tag"]})')
+# 	if clip.work_time() < args.clip_length:
+# 		print(f'-{clip['tag']:04d}') # store_bad_status(clip)
+# 		return
+# 	print(f'+{clip['tag']:04d}') # store_good_status(clip)
+	
+def store_good_status(clip)->None:
+	# tag , url , good, width , heigh , time
+	clip.extract_info()
+	width  = clip['width']
+	height = clip['height']
+	now=time.time()
+	#def upsert_stream(db_path, url, tag):
+	# Connect to the SQLite database
+	conn = sqlite3.connect(EXPLORE_ORG_DB)
+	cursor = conn.cursor()
+	
+	try:
+		# SQLite Upsert syntax (requires SQLite 3.24.0+)
+		# url must be defined as the PRIMARY KEY for this to work
+		sql = """
+		INSERT INTO streams (tag, url, good, width, height, time)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(url) DO UPDATE SET
+			tag = excluded.tag, good=excluded.good,  width=excluded.width, height=excluded.height, time=excluded.time;
+		"""
+		cursor.execute(sql, (clip['tag'],clip['url'],True,width,height,now))
+		conn.commit()
+		print(f"\n+{clip['tag']} ")
+	
+	except sqlite3.Error as e:
+		print(f"An error occurred: {e}")
+		conn.rollback()
+	
+	finally:
+		conn.close()
 		
-# class HeartbeatCheck:
-# 	def __init__(S,pulse):
-# 		S.pulse=pulse
-# 		S.clients = {}
-#
-# 	def checkup(S,name):
-# 		S.clients[name]=time.time()
-#
-# 	async def pacemaker(S):
-# 		while True:
-# 			now = time.time()
-# 			for name, last_seen in S.clients.items():
-# 				latency = now - last_seen
-# 				if latency > S.pulse:
-# 					print(f"CRITICAL: {name} is HANGING! (Last seen {latency:.2f}s ago)")
-# 				else:
-# 					print(f"{name}",end='')
-# 			await asyncio.sleep(2)
-#
+def store_bad_status(clip)->None:
+	# tag , url , good, width , heigh , time
+	now=time.time()
+	conn = sqlite3.connect(EXPLORE_ORG_DB)
+	cursor = conn.cursor()
+	
+	try:
+		# SQLite Upsert syntax (requires SQLite 3.24.0+)
+		# url must be defined as the PRIMARY KEY for this to work
+		sql = """
+		INSERT INTO streams (tag, url, good, time)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(url) DO UPDATE SET
+			tag = excluded.tag, good=excluded.good, time=excluded.time;
+		"""
+		cursor.execute(sql, (clip['tag'],clip['url'],False,now))
+		conn.commit()
+		print(f"\n-{clip['tag']}")
+	
+	except sqlite3.Error as e:
+		print(f"An error occurred: {e}")
+		conn.rollback()
+	
+	finally:
+		conn.close()
+
+import traceback
+
+async def debug_tasks():
+	# Get all tasks currently in the loop
+	tasks = asyncio.all_tasks()
+	print(f"Active tasks: {len(tasks)}")
+	for task in tasks:
+		# Print the task and where it is currently executing in the code
+		task.print_stack()
+
 async def main():
-	# main
 	clip_queue   = asyncio.Queue(8)
 	urlproducer  = UrlProducer()
-	#drHeart      = HeartbeatCheck(4)
-	#monitorsXgeo = get_monitor_geometries()
-	tasks    = [MpvSocketPlayer(Xgeo).display(clip_queue)
-		for Xgeo in get_monitor_geometries()]
-	#tasks        = [MpvDisplayer(mpv_sock,drHeart).display(clip_queue) for mpv_sock in mpv_socks]
-	#tasks.append(drHeart.pacemaker())
+	#drHeart     = HeartbeatCheck(4)
+	if IS_HACK:
+		Xgeos = get_monitor_geometries()
+	else:
+		Xgeos = get_monitor_geometries(3,2)
+	ic(Xgeos)
+	#tasks    = [MpvSocketPlayer(Xgeo).display(clip_queue) for Xgeo in Xgeos]
+	tasks = [MpvSocketPlayer(Xgeo).display(clip_queue) for Xgeo in Xgeos]
+	
 	tasks.append(urlproducer.fill_queue(clip_queue))
-	ic(tasks)
 	group = asyncio.gather(*tasks)
-	ic(group)
 	try:
 		await group
 	except Exception as e:
@@ -591,61 +718,8 @@ async def main():
 			task.close()
 	await asyncio.sleep(2)
 	print (f'Clean END reached bye')
-	
-def test_Explore():
-	print (f'test_Explore 23 {str(Explore(23))}')
-	exit(0)
-
-def update_tags(db_path):
-	# one time use kept as an example for personal use
-	# Connect to the SQLite database
-	ic(db_path)
-	conn = sqlite3.connect(db_path)
-	cursor = conn.cursor()
-	
-	try:
-		# Select the primary key (id) and the field used for logic (url)
-		cursor.execute("SELECT url FROM streams")
-		#rows = cursor.fetchall()
-		urls = [row[0] for row in cursor.fetchall()]
-		#ic(urls)
-		for url in urls:
-			if not url:
-				continue
-			nt = Explore(url)
-			new_tag = int(nt)
-			print(f'{new_tag} -> {url}')
-			new_tag = int(Explore(url))
-			# Update the specific record
-			cursor.execute(
-				"UPDATE streams SET tag = ? WHERE url = ?",
-				(new_tag, url)
-			)
-		
-		# Commit the changes to the database
-		conn.commit()
-		print("Database updated successfully.")
-	
-	except sqlite3.Error as e:
-		print(f"An error occurred: {e}")
-		conn.rollback()
-	
-	finally:
-		# Close the connection
-		conn.close()
-	exit(0)
 
 if __name__ == '__main__':
-	# socket_tester()
-	# detect_monitors_tester()
-	# test_Explore()
-	# update_tags(EXPLORE_ORG_DB)
 	print(f'ExploreOrgScreenSaver pid({os.getpid()})')
-	#
-	# try:
-	# 	asyncio.run(main())
-	# except KeyboardInterrupt as e:
-	# 	print(e)
-	# 	print("\nScreensaver halted.")
-	# 	sys.exit(0)
+	print(f'{args.clip_length=}')
 	asyncio.run(main())
