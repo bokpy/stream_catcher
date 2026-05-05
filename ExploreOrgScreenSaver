@@ -16,7 +16,7 @@ import argparse
 import sqlite3
 import socket
 import asyncio
-
+import errno
 import atexit
 
 #import atexit
@@ -65,7 +65,56 @@ EXPLORE_ORG_DB = CONFIG_DIR + 'explore.org.db'
 MAX_PICK = 500
 IS_HACK='XSCREENSAVER_WINDOW' in os.environ
 NEXT_ID = 'A'
-	
+STREAMINFO_REQUEST = 10
+IDLE_REQUEST       = 20
+RUNNING_REQUEST    = 30
+# def empty_socket_buffer(sock):
+# 	"""
+# 	Reads and discards all available data from the socket's receive buffer.
+# 	Works for both blocking and non-blocking sockets.
+# 	"""
+# 	# Temporarily set to non-blocking mode
+# 	sock.setblocking(False)
+# 	try:
+# 		while True:
+# 			try:
+# 				data = sock.recv(4096)  # Read up to 4KB at a time
+# 				if not data:
+# 					break  # Connection closed
+# 			except BlockingIOError:
+# 				# No more data available
+# 				break
+# 			except socket.error as e:
+# 				if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+# 					break
+# 				else:
+# 					raise
+# 	finally:
+# 		# Restore blocking mode
+# 		sock.setblocking(True)
+
+# # Example usage:
+# if __name__ == "__main__":
+# 	# Example: connect to a server and clear any pending data
+# 	s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# 	s.connect(("example.com", 80))
+# 	s.sendall(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+#
+# 	# Empty any pending data in the buffer
+# 	empty_socket_buffer(s)
+#
+# 	s.close()
+
+def is_iterable(obj):
+	"""
+	Check if an object is iterable (excluding strings if desired).
+	"""
+	try:
+		iter(obj)
+		return True
+	except TypeError:
+		return False
+
 def get_an_id():
 	global NEXT_ID
 	id=NEXT_ID
@@ -118,13 +167,14 @@ def get_monitor_geometries(divw=0,divh=0):
 	"""
 	
 	def devide(dw, dh,width, heigth):
+		border = 30
 		width, heigth = int(width), int(heigth)
 		div_width  = width  // dw
 		div_heigth = heigth // dh
 		res = []
 		for i in range(0, dw):
 			for j in range(0, dh):
-				t = (div_width, div_heigth, i * div_width, j * div_heigth)
+				t = (div_width-border, div_heigth-border, i * div_width, j * div_heigth)
 				res.append(t)
 		r = [str(x[0]) + 'x' + str(x[1]) + '+' + str(x[2]) + '+' + str(x[3]) for x in res]
 		return r
@@ -143,193 +193,145 @@ def get_monitor_geometries(divw=0,divh=0):
 	elif divh == 0:
 		divh = 1
 	return devide(divw, divh, match[0][1], match[0][2])
-	
-# def test_reply_for_value(reply, value):
-# 	#print(f'test_reply_for_value({type(reply)=}, {type(value)=})')
-# 	for dct in reply:
-# 		for key, val in dct.items():
-# 			if val == value:
-# 				print(f"{key}: {val} hit")
-# 				return True
-# 	return False
 
-class Clip(dict):
+def check_for_key(obj, key):
+	todo=[obj]
+	while len(todo):
+		cur = todo.pop()
+		if isinstance(cur,dict):
+			for k, v in cur.items():
+				if k == key:
+					return v
+				if isinstance(v, dict) or isinstance(v, list):
+					todo.append(v)
+		if isinstance(cur,list):
+			for c in cur:
+				todo.append(c)
+	return None
+
+def check_for_value(items,value):
+	if isinstance(items,dict):
+		for i in items.values():
+			if i == value:
+				return True
+		return False
+	try:
+		for item in items:
+			if check_for_value(item,value):
+				return True
+	except TypeError:
+		ic(items)
+		print (f'Is no dict nor iterable.')
+	return False
+
+def ct(flt):
+	return f'{int(flt *10 % 100000):05d}'
+
+class Clip:
 	
 	def __init__(S,tag,url=None):
-		dict.__init__(S)
 		if url :
-			S['tag']=tag
-			S['url']=url
+			S.tag=int(tag)
+			S.url=url
 		else:
-			S['tag'],S['url'] = Explore(tag).int_str()
-
+			S.tag,S.url = Explore(tag).int_str()
+			
+		S.born = time.time()
+		S.data = None
+		S.clocked_in  = .0
+		S.clocked_out = .0
+		S.ran = False
+	
+	def __str__(S):
+		return (f'Clip( {S.tag:04d}) ran: {S.ran} born: {ct(S.born)} '
+		        f'in: {ct(S.clocked_in)} out: {ct(S.clocked_out)}'
+				f' age: {ct(S.display_time())} data:{S.data}'
+		        )
+	
 	def clock_in(S):
-		S['clock_in'] = time.time()
+		S.clocked_in=time.time()
 		
 	def clock_out(S):
-		S['clock_out'] = time.time()
+		S.clocked_out = time.time()
+		print(f"[{S.tag}] is {S.clocked_out-S.clocked_in:6.2f}sec.")
 		
-	def work_time(S):
-		if ( not 'clock_in' in S ) or (not 'clock_out' in S):
-			return 0
-		return S['clock_out'] - S['clock_in']
+	def display_time(S):
+		if ( S.clocked_out < 1.0 )  or (S.clocked_in < 1.0) :
+			return 0.0001
+		return S.clocked_out -  S.clocked_in
 	
 	def stint(S):
-		if not 'clock_in' in S:
-			return 0
-		return time.time() - S['clock_in']
+		if  S.clocked_in < 1.0:
+			ic(S.clocked_in)
+			exit (657)
+		return time.time() - S.clocked_in
 	
-	def extract_info(S):
-		'''
-		info = [{'data'      : [{'albumart'        : False,
-						  'codec'           : 'h264',
-						  'decoder-desc'    : 'H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10',
-						  'default'         : False,
-						  'demux-fps'       : 30.0,
-						  'demux-h'         : 1080,
-						  'demux-w'         : 1920,
-						  'dependent'       : False,
-						  'external'        : False,
-						  'ff-index'        : 0,
-						  'forced'          : False,
-						  'hearing-impaired': False,
-						  'id'              : 1,
-						  'image'           : False,
-						  'main-selection'  : 0,
-						  'program-id'      : 0,
-						  'selected'        : True,
-						  'type'            : 'video',
-						  'visual-impaired' : False},
-						 {'albumart'           : False,
-						  'audio-channels'     : 2,
-						  'codec'              : 'aac',
-						  'decoder-desc'       : 'AAC (Advanced Audio Coding)',
-						  'default'            : False,
-						  'demux-channel-count': 2,
-						  'demux-channels'     : 'stereo',
-						  'demux-samplerate'   : 44100,
-						  'dependent'          : False,
-						  'external'           : False,
-						  'ff-index'           : 1,
-						  'forced'             : False,
-						  'hearing-impaired'   : False,
-						  'id'                 : 1,
-						  'image'              : False,
-						  'main-selection'     : 0,
-						  'program-id'         : 0,
-						  'selected'           : True,
-						  'type'               : 'audio',
-						  'visual-impaired'    : False}],
-		  'error'     : 'success',
-		  'request_id': 16},
-		 {'event': 'audio-reconfig'},
-		 {'event': 'audio-reconfig'},
-		 {'event': 'file-loaded'}]
-		 '''
-		
-		S['width'] = S['height'] = 0
-		if not 'data' in S:
-			return
-		if len(S['data']) == 0:
-			print(f'Clip {S["tag"]} empty data')
-			return
-			
-		JDUMP('<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<',S['data'])
-		while S['width'] == 0:
-			for track in S['data']['data']:
-				print(f'{track=}')
-				S['width']  = track.get('demux-w',0)
-				S['height'] = track.get('demux-h',0)
-				if S['width']:
-					break
-		print (f"{S['width']=}x{S['height']=} >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-		
-async def aio_command(socket_path,responce_test, *args):
+async def aio_communicate(socket_path,request_id, *args):
 	# 1. Establish the async connection
 	reader, writer = await asyncio.open_unix_connection(socket_path)
 	
 	try:
 		# 2. Prepare and send the command
-		command = {"command": list(args), "request_id": 100}
+		command = {"command": list(args), "request_id": request_id}
 		writer.write((json.dumps(command) + "\n").encode())
 		await writer.drain()  # Ensure the data is sent
 		
 		# 3. Read the stream asynchronously
 		while True:
 			# This line does not block the entire program
-			line_bytes = await reader.readline()
-			if not line_bytes:
+			bytes = await reader.read(2048)
+			if not bytes:
 				break
-			
-			data = json.loads(line_bytes.decode())
-			# ic(data)
-			#
-			# Handle the response logic
-			if data.get("request_id") == 100:
-				if data.get("error") != "success":
-					print(f"Error: {data['error']}")
-					return False
-			
-			if data.get("event") == responce_test:
-				print(f'Success event:"{responce_test}"')
-				return True
-			
-			if data.get("event") == "end-file" and data.get("reason") == "error":
-				print(f'Failed: "{responce_test}"')
-				return False
+			if bytes:
+				deco = bytes.decode()
+				d = deco.split("\n")
+				ret = [ json.loads(i) for i in d if i]
+				#print(f'{ret=}')
+				return ret
+			return False
 	
 	finally:
+		#empty_socket_buffer(writer)
 		writer.close()
 		await writer.wait_closed()
 
-async def aio_data_request(socket_path,*args):
-	# 1. Establish the async connection
-	reader, writer = await asyncio.open_unix_connection(socket_path)
-	
-	try:
-		# 2. Prepare and send the command
-		command = {"command": list(args), "request_id": 12}
-		writer.write((json.dumps(command) + "\n").encode())
-		await writer.drain()  # Ensure the data is sent
-		
-		# 3. Read the stream asynchronously
-		while True:
-			# This line does not block the entire program
-			line_bytes = await reader.readline()
-			if not line_bytes:
-				break
-			
-			data = json.loads(line_bytes.decode())
-			#ic(list(args),data)
-			
-			# Handle the response logic
-			if data.get("request_id") == 12:
-				if data.get("error") != "success":
-					print(f"Error: {data['error']}")
-					return None
-				return data
-			
-			# if data.get("event") == responce_test:
-			# 	print(f'Success event:"{responce_test}"')
-			# 	return True
-			#
-			# if data.get("event") == "end-file" and data.get("reason") == "error":
-			# 	print(f'Failed: "{responce_test}"')
-			# 	return False
-	
-	finally:
-		writer.close()
-		await writer.wait_closed()
+# async def aio_data_request(socket_path,*args):
+# 	# 1. Establish the async connection
+# 	reader, writer = await asyncio.open_unix_connection(socket_path)
+#
+# 	try:
+# 		# 2. Prepare and send the command
+# 		command = {"command": list(args), "request_id": 12}
+# 		writer.write((json.dumps(command) + "\n").encode())
+# 		await writer.drain()  # Ensure the data is sent
+#
+# 		# 3. Read the stream asynchronously
+# 		while True:
+# 			# This line does not block the entire program
+# 			line_bytes = await reader.readline()
+# 			if not line_bytes:
+# 				break
+#
+# 			data = json.loads(line_bytes.decode())
+# 			#ic(list(args),data)
+#
+# 			# Handle the response logic
+# 			if data.get("request_id") == 12:
+# 				if data.get("error") != "success":
+# 					print(f"Error: {data['error']}")
+# 					return None
+# 				return data
+# 	finally:
+# 		writer.close()
+# 		await writer.wait_closed()
 
-# To run the async function:
-# asyncio.run(monitor_mpv_async('/tmp/mpvsocket', 'https://example.com/video.mp4'))
 class MpvSocketPlayer:
 	
 	def __init__(S,Xgeo):
 		S.id = get_an_id()
 		print(f'MpvSocketPlayer({S.id},{Xgeo})')
 		S.socket_path = '/tmp/mpv-socket-' + S.id
-		print(f'{S.socket_path=}')
+		#print(f'{S.socket_path=}')
 		S.set_options(Xgeo)
 		S.server_proc = S.start_server()
 		S.dt_check = .8  # polling interval
@@ -381,119 +383,69 @@ class MpvSocketPlayer:
 		S.options += [
 			"--keepaspect=no"
 			, "--geometry=" + Xgeo
+			, "--no-border"
 			#"--geometry=50%x50%"
 			#,'--length=10'
 		]
 
-	# def send_command(S,*args):
-	# 	def jsonify_response(r):
-	# 		s = r.decode('utf-8').strip()
-	# 		r_list = '[' + s.replace('\n', ',') + ']'
-	# 		try:
-	# 			return json.loads(r_list)
-	# 		except json.JSONDecodeError as e:
-	# 			print(e)
-	# 			ic(r_list)
-	# 			raise
-	#
-	# 	if not os.path.exists(S.socket_path):
-	# 		print(f"Error: Socket {S.socket_path} not found. Is mpv running?")
-	# 		return None
-	#
-	# 	#S.request_id += 1
-	# 	payload = {"command": list(args), "request_id": ord(S.id) }
-	# 	#payload = {"command": list(args)}
-	# 	try:
-	# 		with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-	# 			client.connect(S.socket_path)
-	# 			client.settimeout(15.0)
-	# 			payload_bytes = (json.dumps(payload) + '\n').encode('utf-8')
-	# 			client.sendall(payload_bytes)
-	#
-	# 			# If the server is silent, this will now raise socket.timeout
-	# 			# instead of hanging the entire script.
-	# 			return jsonify_response(client.recv(4096))
-	#
-	# 	except socket.timeout as e:
-	# 		print(f"\nThe server {S.name} took too long to respond.")
-	# 		ic(e)
-	# 		return [{'error':'ExploreOrgScreenSaver.send_command() TimeoutError'}]
-	# 	except ConnectionRefusedError as e:
-	# 		print(f"\nThe server {S.name} lost connection.")
-	# 		raise
-	# 	except Exception as e:
-	# 		print(f"\nServer {S.name}: {e}")
-	# 		ic(e)
-	#		raise
-			
-	# async def display(S,q):
-	# 	while True:
-	# 		try:
-	# 			clip = await q.get()
-	# 			print(f'\n{S.name} loadfile[{clip["tag"]}]')
-	# 			start = await aio_command(S.socket_path,'loadfile', clip['url'], 'replace')
-	# 			ic(start)
-	# 			#await asyncio.sleep(random.random()*2.0) # await asyncio.sleep(1.5)
-	# 			clip.clock_in()
-	# 			while clip.stint() < args.clip_length:
-	# 				await asyncio.sleep(2.2)
-	# 				rdl = S.send_command("get_property", "idle-active")
-	# 				print(f'{S.name} {json.dumps(rdl,indent=4)}')
-	# 				for rd in rdl:
-	# 					if 'data' in rd:
-	# 						print(f'{S.id}',end='')
-	# 						if rd['data']:
-	# 							# mpv is idle so the clip is not running long enough
-	# 							break
-	# 						elif not 'data' in clip:
-	# 							print( f'{S.name} collect info')
-	# 							S.ask_stream_info(clip)
-	# 			clip.clock_out()
-	# 			print(f'{S.name} replace [{clip["tag"]}] after {clip.work_time():6.2f}s')
-	# 			q.task_done()
-	# 			await assess(clip)
-	# 		except RuntimeError as e:
-	# 			await debug_tasks()
-	# 			exit(666)
-	# 		except Exception as e:
-	# 			ic(e)
-	# 			exit(666)
-	#
-	# def get_property(S,property):
-	# 	return S.send_command("get_property", property)
-	#
 	async def ask_stream_info(S,clip):
-		info = await aio_data_request(S.socket_path,"get_property", "track-list")
-		if info:
-			clip['data'] = info
-		
+		info = await aio_communicate(S.socket_path,STREAMINFO_REQUEST,"get_property", "track-list")
+		clip.data = (0,0)
+		width  = check_for_key(info,'demux-w')
+		height = check_for_key(info,'demux-h')
+		print(f'Clip ({clip.tag}) {width}x{height}')
+		if width and height:
+			clip.data = (width,height)
+	
+			
 	async def display(S, q):
+		def check_is_idle(report):
+			#[{'data': False, 'request_id': 100, 'error': 'success'}]
+			r = report[0]
+			if r.get('request_id') != IDLE_REQUEST:
+				return False
+			if r.get('error') != 'success':
+				return False
+			if r.get('data'):
+				print (f'check_is_idle -> TRUE')
+			return  r.get('data')
+			
 		while True:
 			try:
+				print()
 				while True:
 					clip = await q.get()
-					print(f'{S.name} display_once [{clip["tag"]}]')
-					start = await aio_command(S.socket_path,"start-file",'loadfile', clip['url'], 'replace')
-					if start: # clip is on display
+					#clip.clock_in()
+					print(f'STARTING: {clip}')
+					start = await aio_communicate(S.socket_path,RUNNING_REQUEST,'loadfile', clip.url, 'replace')
+					if check_for_value(start,"start-file"):
+						print(f'RUNING  : {clip}')
+						clip.ran = True
 						break
+					clip.clock_out()
 					q.task_done()
+					print(f'NO STARTERt: {clip}')
 					await assess(clip)
 			except Exception as e:
 				ic(e)
 				raise
 			try:
 				clip.clock_in()
-				
+				print( f'Start Stint: {clip}')
 				while clip.stint() < args.clip_length:
-					status = await aio_data_request(S.socket_path,"get_property", "idle-active")
-					print(f'{S.id}->{status}')
-					if (status == None) or status.get('data'):
+					idle = await aio_communicate(S.socket_path,IDLE_REQUEST,"get_property", "idle-active")
+					#JDUMP(S.id,idle)
+					if check_is_idle(idle):
+						print( f'Idle stop Stint: {clip}')
+						ic(idle)
 						break
+					
 					await asyncio.sleep(2.2)
-					if not 'data' in clip:
+					if not clip.data:
 						await S.ask_stream_info(clip)
 				clip.clock_out()
 				q.task_done()
+				print( f'End Stint: {clip}')
 				await assess(clip)
 			except RuntimeError as e:
 				await debug_tasks()
@@ -507,16 +459,6 @@ def JDUMP(name,jsn):
 
 class UrlProducer:
 
-	table = """
-		CREATE TABLE IF NOT EXISTS streams (
-			url    TEXT PRIMARY KEY,
-			tag    INTEGER DEFAULT -1,
-			good   INTEGER DEFAULT 1,
-			width  INTEGER DEFAULT 0,
-			height INTEGER DEFAULT 0,
-			time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);"""
-	
 	def __init__(S):
 		S.createdb_if_needed()
 		S.fill_tombola()
@@ -529,9 +471,8 @@ class UrlProducer:
 	def get_max_tag(S):
 		try:
 			conn, cursor = S.db_connect()
-	
 			query = """
-			SELECT * FROM streams
+			SELECT tag FROM streams
 			WHERE good = 1
 			ORDER BY tag DESC
 			LIMIT 1;
@@ -539,11 +480,12 @@ class UrlProducer:
 			
 			cursor.execute(query)
 			record = cursor.fetchone()
+			print(f'#########{record=}#########')
 			
 			if record:
-				return list(record)[0]
+				return record[0]
 			else:
-				return "No records found matching the criteria."
+				return 0
 		
 		except sqlite3.Error as e:
 			ic(e)
@@ -590,17 +532,28 @@ class UrlProducer:
 				continue
 			index = random.randint(0, S.max_pick)
 			clip=Clip(S.tombola[index])
-			print(f'[Q{clip['tag']:04d}]',end='')
+			print(clip)
 			await q.put(clip)
 	
 	def createdb_if_needed(S):
-		if not os.path.isdir(CONFIG_DIR):
-			try:
-				os.mkdir(CONFIG_DIR)
-			except OSError as e:
-				print(f'Could not make dir "{CONFIG_DIR}".')
-				print(e)
-				exit(e.errno)
+	
+		try:
+			os.makedirs(CONFIG_DIR, exist_ok=True)
+		except OSError as e:
+			print(f'Could not make dir "{CONFIG_DIR}".')
+			print(e)
+			exit(e.errno)
+		
+		table = """
+		CREATE TABLE IF NOT EXISTS streams (
+			url    TEXT PRIMARY KEY,
+			tag    INTEGER DEFAULT -1,
+			good   INTEGER DEFAULT 1,
+			width  INTEGER DEFAULT 0,
+			height INTEGER DEFAULT 0,
+			time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);"""
+	
 		try:
 			con = sqlite3.connect(EXPLORE_ORG_DB)
 			print(f'Opened "{EXPLORE_ORG_DB}" SQLite database\nwith version {sqlite3.sqlite_version} successfully.')
@@ -609,49 +562,37 @@ class UrlProducer:
 			print(e)
 			exit(1)
 		cur = con.cursor()
-		cur.execute(UrlProducer.table)
+		cur.execute(table)
 		con.close()
 
 async def assess(clip):
-	print(f'assess({clip["tag"]} {clip.work_time():6.2f}sec )',end='')
-	if clip.work_time() <  0.3 * args.clip_length:
-		print( 'bad')
+	print(f'ASSESS: {clip}')
+	if clip.display_time() <  0.3 * args.clip_length:
+		#print( 'bad')
 		store_bad_status(clip)
 		return
 	print('good')
 	store_good_status(clip)
-
-# async def assess(clip):
-# 	print(f'assess({clip["tag"]})')
-# 	if clip.work_time() < args.clip_length:
-# 		print(f'-{clip['tag']:04d}') # store_bad_status(clip)
-# 		return
-# 	print(f'+{clip['tag']:04d}') # store_good_status(clip)
 	
 def store_good_status(clip)->None:
 	# tag , url , good, width , heigh , time
-	clip.extract_info()
-	width  = clip['width']
-	height = clip['height']
-	now=time.time()
-	#def upsert_stream(db_path, url, tag):
-	# Connect to the SQLite database
-	conn = sqlite3.connect(EXPLORE_ORG_DB)
+	width  = height = 0
+	if clip.data:
+		width  = height = clip.data
+	now    = time.time()
+	conn   = sqlite3.connect(EXPLORE_ORG_DB)
 	cursor = conn.cursor()
 	
 	try:
-		# SQLite Upsert syntax (requires SQLite 3.24.0+)
-		# url must be defined as the PRIMARY KEY for this to work
 		sql = """
-		INSERT INTO streams (tag, url, good, width, height, time)
+		INSERT INTO streams (url, tag, good, width, height, time)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			tag = excluded.tag, good=excluded.good,  width=excluded.width, height=excluded.height, time=excluded.time;
 		"""
-		cursor.execute(sql, (clip['tag'],clip['url'],True,width,height,now))
+		cursor.execute(sql, (clip.url,clip.tag,1,width,height,now))
 		conn.commit()
-		print(f"\n+{clip['tag']} ")
-	
+		
 	except sqlite3.Error as e:
 		print(f"An error occurred: {e}")
 		conn.rollback()
@@ -660,7 +601,7 @@ def store_good_status(clip)->None:
 		conn.close()
 		
 def store_bad_status(clip)->None:
-	# tag , url , good, width , heigh , time
+	# url, tag, good, width, heigh ,time
 	now=time.time()
 	conn = sqlite3.connect(EXPLORE_ORG_DB)
 	cursor = conn.cursor()
@@ -669,15 +610,14 @@ def store_bad_status(clip)->None:
 		# SQLite Upsert syntax (requires SQLite 3.24.0+)
 		# url must be defined as the PRIMARY KEY for this to work
 		sql = """
-		INSERT INTO streams (tag, url, good, time)
+		INSERT INTO streams ( url, tag, good, time)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
-			tag = excluded.tag, good=excluded.good, time=excluded.time;
+			tag=excluded.tag, good=excluded.good, time=excluded.time;
 		"""
-		cursor.execute(sql, (clip['tag'],clip['url'],False,now))
+		cursor.execute(sql, (clip.url,clip.tag,0,now))
 		conn.commit()
-		print(f"\n-{clip['tag']}")
-	
+		
 	except sqlite3.Error as e:
 		print(f"An error occurred: {e}")
 		conn.rollback()
