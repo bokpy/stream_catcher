@@ -56,6 +56,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument('-t', '--clip-length',default=20.0,type=float,nargs='?',help="display time of a clip in seconds")
 parser.add_argument('-w', '--window-id', type=str, nargs='?', help="root window id passed by the xscreensaver")
 parser.add_argument('-m', '--mode', type=str, nargs='?', help='How to scale a stream "original","stretch" or "zoom"')
+parser.add_argument('-s', '--sound', action='store_true', help='Trurn Sound on for the primary screen')
 parser.add_argument('-o', '--only-tested', action='store_true', help="Don't try to show untested streams")
 #parser.add_argument('-l', '--loud', nargs='?' ,action='store_true', help="Produce debug output.")
 
@@ -68,6 +69,7 @@ NEXT_ID = 'A'
 STREAMINFO_REQUEST = 10
 IDLE_REQUEST       = 20
 RUNNING_REQUEST    = 30
+SOUND=False
 # def empty_socket_buffer(sock):
 # 	"""
 # 	Reads and discards all available data from the socket's receive buffer.
@@ -194,7 +196,7 @@ def get_monitor_geometries(divw=0,divh=0):
 		divh = 1
 	return devide(divw, divh, match[0][1], match[0][2])
 
-def check_for_key(obj, key):
+def check_for_key(obj, key,on_fail=None):
 	todo=[obj]
 	while len(todo):
 		cur = todo.pop()
@@ -207,7 +209,7 @@ def check_for_key(obj, key):
 		if isinstance(cur,list):
 			for c in cur:
 				todo.append(c)
-	return None
+	return on_fail
 
 def check_for_value(items,value):
 	if isinstance(items,dict):
@@ -237,38 +239,22 @@ class Clip:
 			S.tag,S.url = Explore(tag).int_str()
 			
 		S.born = time.time()
-		S.data = None
-		S.clocked_in  = .0
-		S.clocked_out = .0
-		S.ran = False
-	
+		S.stint = 0.0
+		S.height = S.width = 0
+		
 	def __str__(S):
-		return (f'Clip( {S.tag:04d}) ran: {S.ran} born: {ct(S.born)} '
-		        f'in: {ct(S.clocked_in)} out: {ct(S.clocked_out)}'
-				f' age: {ct(S.display_time())} data:{S.data}'
-		        )
-	
-	def clock_in(S):
-		S.clocked_in=time.time()
+		return f'Clip( {S.tag:04d}) stint: {ct(S.stint)}  {S.width}x{S.height}'
+
+	def time_stint(S, val):
+		S.stint += val
 		
-	def clock_out(S):
-		S.clocked_out = time.time()
-		print(f"[{S.tag}] is {S.clocked_out-S.clocked_in:6.2f}sec.")
-		
-	def display_time(S):
-		if ( S.clocked_out < 1.0 )  or (S.clocked_in < 1.0) :
-			return 0.0001
-		return S.clocked_out -  S.clocked_in
-	
-	def stint(S):
-		if  S.clocked_in < 1.0:
-			ic(S.clocked_in)
-			exit (657)
-		return time.time() - S.clocked_in
-	
 async def aio_communicate(socket_path,request_id, *args):
 	# 1. Establish the async connection
-	reader, writer = await asyncio.open_unix_connection(socket_path)
+	try:
+		reader, writer = await asyncio.open_unix_connection(socket_path)
+	except Exception as e:
+		ic(socket_path,e)
+		exit(257)
 	
 	try:
 		# 2. Prepare and send the command
@@ -328,10 +314,12 @@ async def aio_communicate(socket_path,request_id, *args):
 class MpvSocketPlayer:
 	
 	def __init__(S,Xgeo):
+		global IS_HACK
 		S.id = get_an_id()
 		print(f'MpvSocketPlayer({S.id},{Xgeo})')
-		S.socket_path = '/tmp/mpv-socket-' + S.id
-		#print(f'{S.socket_path=}')
+		hack = 'H' if IS_HACK else 'T'
+		S.socket_path = '/tmp/mpv-socket-' + S.id + hack
+		print(f'{S.socket_path=}')
 		S.set_options(Xgeo)
 		S.server_proc = S.start_server()
 		S.dt_check = .8  # polling interval
@@ -339,13 +327,28 @@ class MpvSocketPlayer:
 		atexit.register(S.kill_me)
 		
 	def start_server(S):
-		proc = subprocess.Popen(
-			S.options
-			, stdin =subprocess.DEVNULL
-			, stdout=subprocess.DEVNULL
-			, stderr=subprocess.DEVNULL
-			)
-		time.sleep(1)
+		ic(S.options)
+		try:
+			proc = subprocess.Popen(
+				S.options
+				, stdin =subprocess.DEVNULL
+				, stdout=subprocess.DEVNULL
+				, stderr=subprocess.DEVNULL
+				)
+		except Exception as e:
+			ic(e)
+			exit(340)
+			
+		ok=False
+		for _ in range(5):
+			time.sleep(.4)
+			ok = proc.poll() == None
+			if ok:
+				break
+		
+		if ok == False:
+			print(f'Proc still born with {proc.returncode} ')
+			exit(347)
 		return proc
 	
 	def kill_me(S):
@@ -356,6 +359,7 @@ class MpvSocketPlayer:
 			S.server_proc=None
 	
 	def set_options(S,Xgeo):
+		global SOUND
 		S.options=['mpv'
 			,'--input-ipc-server='+S.socket_path
 			, '--idle'
@@ -369,16 +373,21 @@ class MpvSocketPlayer:
 			S.options += ["--video-zoom=1", "--panscan=1.0"]
 		# options if running as xscreensaver hack
 		if IS_HACK:
+			if args.sound and not SOUND:
+				SOUND=True
+			else:
+				S.options += ['--audio=no']
+				
 			wid = str(os.environ['XSCREENSAVER_WINDOW'])
 			S.options += [
-				'--wid=' + wid
-				, '-audio=no'
-				, "-quiet"
-				, "-hwdec=no"
-				, "--geometry=" + Xgeo
-				#, '--length=' + str(int(args.clip_length))
-				# ,"-really-quiet"
-				, "--fullscreen"]
+				 "-quiet"
+				 ,'--wid=' + wid
+			 	 ,"--geometry=" + Xgeo
+			 	#,"-hwdec=no"
+			# 	#, '--length=' + str(int(args.clip_length))
+			# 	# ,"-really-quiet"
+			# 	, "--fullscreen"
+			 ]
 			return
 		S.options += [
 			"--keepaspect=no"
@@ -389,16 +398,16 @@ class MpvSocketPlayer:
 		]
 
 	async def ask_stream_info(S,clip):
+		if clip.width + clip.height > 0:
+			return
 		info = await aio_communicate(S.socket_path,STREAMINFO_REQUEST,"get_property", "track-list")
-		clip.data = (0,0)
-		width  = check_for_key(info,'demux-w')
-		height = check_for_key(info,'demux-h')
-		print(f'Clip ({clip.tag}) {width}x{height}')
-		if width and height:
-			clip.data = (width,height)
-	
-			
+		ic(info)
+		clip.width  = check_for_key(info,'demux-w',0)
+		clip.height = check_for_key(info,'demux-h',0)
+		ic(clip.width,clip.height)
+		
 	async def display(S, q):
+		
 		def check_is_idle(report):
 			#[{'data': False, 'request_id': 100, 'error': 'success'}]
 			r = report[0]
@@ -406,54 +415,36 @@ class MpvSocketPlayer:
 				return False
 			if r.get('error') != 'success':
 				return False
-			if r.get('data'):
-				print (f'check_is_idle -> TRUE')
+			# if r.get('data'):
+			# 	print (f'check_is_idle -> TRUE')
 			return  r.get('data')
-			
+		
 		while True:
-			try:
-				print()
-				while True:
-					clip = await q.get()
-					#clip.clock_in()
-					print(f'STARTING: {clip}')
-					start = await aio_communicate(S.socket_path,RUNNING_REQUEST,'loadfile', clip.url, 'replace')
-					if check_for_value(start,"start-file"):
-						print(f'RUNING  : {clip}')
-						clip.ran = True
-						break
-					clip.clock_out()
-					q.task_done()
-					print(f'NO STARTERt: {clip}')
-					await assess(clip)
-			except Exception as e:
-				ic(e)
-				raise
-			try:
-				clip.clock_in()
-				print( f'Start Stint: {clip}')
-				while clip.stint() < args.clip_length:
-					idle = await aio_communicate(S.socket_path,IDLE_REQUEST,"get_property", "idle-active")
-					#JDUMP(S.id,idle)
-					if check_is_idle(idle):
-						print( f'Idle stop Stint: {clip}')
-						ic(idle)
-						break
-					
-					await asyncio.sleep(2.2)
-					if not clip.data:
-						await S.ask_stream_info(clip)
-				clip.clock_out()
+			clip = await q.get()
+			print(f'STARTING: {clip}')
+			start = await aio_communicate(S.socket_path,RUNNING_REQUEST,'loadfile', clip.url, 'replace')
+			ic(start,check_for_value(start,"success"))
+			if not check_for_value(start,"success"):
 				q.task_done()
-				print( f'End Stint: {clip}')
+				print(f'NON START: {clip}')
 				await assess(clip)
-			except RuntimeError as e:
-				await debug_tasks()
-				exit(124)
-			except Exception as e:
-				ic(e)
-				exit(434)
-			
+				continue
+			stoptime=time.time() + args.clip_length
+			dt = 1.2
+			while time.time()  <  stoptime:
+				await asyncio.sleep(dt)
+				await S.ask_stream_info(clip)
+				clip.time_stint( dt)
+				idle = await aio_communicate(
+					S.socket_path, IDLE_REQUEST
+					, "get_property", "idle-active")
+				if check_is_idle(idle):
+					print(f'IDLE STOP: {clip}')
+					break
+			q.task_done()
+			print(f'FINNISH: {clip}')
+			await assess(clip)
+
 def JDUMP(name,jsn):
 	print(f'{name} {json.dumps(jsn,indent=4)}')
 
@@ -567,20 +558,17 @@ class UrlProducer:
 
 async def assess(clip):
 	print(f'ASSESS: {clip}')
-	if clip.display_time() <  0.3 * args.clip_length:
+	if clip.stint <  20.0:
 		#print( 'bad')
 		store_bad_status(clip)
 		return
 	print('good')
 	store_good_status(clip)
 	
-def store_good_status(clip)->None:
+def store_good_status(clip:Clip)->None:
 	# tag , url , good, width , heigh , time
-	width  = height = 0
-	if clip.data:
-		width  = height = clip.data
-	now    = time.time()
-	conn   = sqlite3.connect(EXPLORE_ORG_DB)
+	now     = time.time()
+	conn    = sqlite3.connect(EXPLORE_ORG_DB)
 	cursor = conn.cursor()
 	
 	try:
@@ -590,12 +578,13 @@ def store_good_status(clip)->None:
 		ON CONFLICT(url) DO UPDATE SET
 			tag = excluded.tag, good=excluded.good,  width=excluded.width, height=excluded.height, time=excluded.time;
 		"""
-		cursor.execute(sql, (clip.url,clip.tag,1,width,height,now))
+		cursor.execute(sql, (clip.url,clip.tag,1,clip.width,clip.height,now))
 		conn.commit()
 		
 	except sqlite3.Error as e:
 		print(f"An error occurred: {e}")
 		conn.rollback()
+		exit(566)
 	
 	finally:
 		conn.close()
@@ -661,5 +650,7 @@ async def main():
 
 if __name__ == '__main__':
 	print(f'ExploreOrgScreenSaver pid({os.getpid()})')
-	print(f'{args.clip_length=}')
+	print(f'{args}')
+	if args.clip_length < 21.0:
+		args.clip_length=21.0
 	asyncio.run(main())
