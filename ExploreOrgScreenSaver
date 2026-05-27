@@ -70,6 +70,7 @@ STREAMINFO_REQUEST = 10
 IDLE_REQUEST       = 20
 RUNNING_REQUEST    = 30
 SOUND=False
+SCREEN=0
 # def empty_socket_buffer(sock):
 # 	"""
 # 	Reads and discards all available data from the socket's receive buffer.
@@ -236,17 +237,19 @@ class Clip:
 			S.tag=int(tag)
 			S.url=url
 		else:
+			#constuct url from tag
 			S.tag,S.url = Explore(tag).int_str()
 			
 		S.born = time.time()
 		S.stint = 0.0
 		S.height = S.width = 0
+		S.did_run = False
 		
 	def __str__(S):
-		return f'Clip( {S.tag:04d}) stint: {ct(S.stint)}  {S.width}x{S.height}'
+		return f'Clip( {S.tag:04d}) stint: {ct(S.stint)}  {S.width:04d}x{S.height:04d} {S.did_run}'
 
-	def time_stint(S, val):
-		S.stint += val
+	def surface(S):
+		return S.width*S.height
 		
 async def aio_communicate(socket_path,request_id, *args):
 	# 1. Establish the async connection
@@ -280,36 +283,6 @@ async def aio_communicate(socket_path,request_id, *args):
 		#empty_socket_buffer(writer)
 		writer.close()
 		await writer.wait_closed()
-
-# async def aio_data_request(socket_path,*args):
-# 	# 1. Establish the async connection
-# 	reader, writer = await asyncio.open_unix_connection(socket_path)
-#
-# 	try:
-# 		# 2. Prepare and send the command
-# 		command = {"command": list(args), "request_id": 12}
-# 		writer.write((json.dumps(command) + "\n").encode())
-# 		await writer.drain()  # Ensure the data is sent
-#
-# 		# 3. Read the stream asynchronously
-# 		while True:
-# 			# This line does not block the entire program
-# 			line_bytes = await reader.readline()
-# 			if not line_bytes:
-# 				break
-#
-# 			data = json.loads(line_bytes.decode())
-# 			#ic(list(args),data)
-#
-# 			# Handle the response logic
-# 			if data.get("request_id") == 12:
-# 				if data.get("error") != "success":
-# 					print(f"Error: {data['error']}")
-# 					return None
-# 				return data
-# 	finally:
-# 		writer.close()
-# 		await writer.wait_closed()
 
 class MpvSocketPlayer:
 	
@@ -359,7 +332,7 @@ class MpvSocketPlayer:
 			S.server_proc=None
 	
 	def set_options(S,Xgeo):
-		global SOUND
+		global SOUND,SCREEN
 		S.options=['mpv'
 			,'--input-ipc-server='+S.socket_path
 			, '--idle'
@@ -379,15 +352,24 @@ class MpvSocketPlayer:
 				S.options += ['--audio=no']
 				
 			wid = str(os.environ['XSCREENSAVER_WINDOW'])
+			# Force to first monitor
+#mpv --wid=$XSCREENSAVER_WINDOW --geometry=1920x1080+0+0 --no-keepaspect-window --screen=0 [file] &
+# Force to second monitor
+#mpv --wid=$XSCREENSAVER_WINDOW --geometry=1920x1080+1920+0 --no-keepaspect-window --screen=1 [file] &
 			S.options += [
 				 "-quiet"
 				 ,'--wid=' + wid
-			 	 ,"--geometry=" + Xgeo
+			 	 # does not help to put things always on two monitors ,"--geometry=" + Xgeo
+				# does not help to put things always on two monitors ,"--screen=" + str(SCREEN)
+				# does not help to put things always on two monitors ," - -x11-bypass-compositor=yes"
+				 #,"--keepaspect-window=no"
+				# does not help to put things always on two monitors ,"--force-window-position=yes"
 			 	#,"-hwdec=no"
 			# 	#, '--length=' + str(int(args.clip_length))
 			# 	# ,"-really-quiet"
 			# 	, "--fullscreen"
 			 ]
+			SCREEN+=1
 			return
 		S.options += [
 			"--keepaspect=no"
@@ -398,14 +380,14 @@ class MpvSocketPlayer:
 		]
 
 	async def ask_stream_info(S,clip):
-		if clip.width + clip.height > 0:
-			return
+		if clip.width * clip.height:
+			return True
 		info = await aio_communicate(S.socket_path,STREAMINFO_REQUEST,"get_property", "track-list")
-		ic(info)
+		#ic(info)
 		clip.width  = check_for_key(info,'demux-w',0)
 		clip.height = check_for_key(info,'demux-h',0)
-		ic(clip.width,clip.height)
-		
+		#ic(clip.width,clip.height)
+
 	async def display(S, q):
 		
 		def check_is_idle(report):
@@ -423,7 +405,7 @@ class MpvSocketPlayer:
 			clip = await q.get()
 			print(f'STARTING: {clip}')
 			start = await aio_communicate(S.socket_path,RUNNING_REQUEST,'loadfile', clip.url, 'replace')
-			ic(start,check_for_value(start,"success"))
+			#ic(start,check_for_value(start,"success"))
 			if not check_for_value(start,"success"):
 				q.task_done()
 				print(f'NON START: {clip}')
@@ -434,15 +416,18 @@ class MpvSocketPlayer:
 			while time.time()  <  stoptime:
 				await asyncio.sleep(dt)
 				await S.ask_stream_info(clip)
-				clip.time_stint( dt)
+				if not clip.surface():
+					break
+				clip.did_run = True
+				clip.stint+= dt
 				idle = await aio_communicate(
 					S.socket_path, IDLE_REQUEST
 					, "get_property", "idle-active")
 				if check_is_idle(idle):
-					print(f'IDLE STOP: {clip}')
+					print(f'IS_IDLE\t\t: {clip}')
 					break
 			q.task_done()
-			print(f'FINNISH: {clip}')
+			print(f'FINNISH\t : {clip}')
 			await assess(clip)
 
 def JDUMP(name,jsn):
@@ -468,7 +453,6 @@ class UrlProducer:
 			ORDER BY tag DESC
 			LIMIT 1;
 			"""
-			
 			cursor.execute(query)
 			record = cursor.fetchone()
 			print(f'#########{record=}#########')
@@ -489,8 +473,22 @@ class UrlProducer:
 		# reg = re.compile(r'-(\d+)/\.')
 		
 		S.good_set = set()
-		S.bad_set  = set()
+		S.bad_set   = set()
 		
+		def make_bad_set():
+			retry_age = time.time() - 14 * 24 * 60 * 60
+			query= f"""'SELECT tag FROM streams WHERE good == 1 AND time < {retry_age} ;"""
+			with sqlite3.connect(EXPLORE_ORG_DB) as con:
+				cursor = con.cursor()
+				try:
+					cursor.execute(query)
+					#print(rows)
+				except sqlite3.OperationalError as e:
+					print(e)
+				rows = cursor.fetchall()
+			ret_set = ( tag[0] for tag in rows)
+			return ret_set
+
 		def make_set(value=True,field='good'):
 			ret_set = set()
 			with sqlite3.connect(EXPLORE_ORG_DB) as con:
@@ -510,7 +508,9 @@ class UrlProducer:
 				ret_set.add(Explore(url).__int__())
 			return ret_set
 		
-		tag_limit  = S.get_max_tag() + 100
+		max_tag = S.get_max_tag()
+		
+		tag_limit  = max_tag + 50 # try this many new higher numbered url's
 		S.bad_set  = make_set(False)
 		S.tombola  = [x for x in range(1,tag_limit) if x not in S.bad_set]
 		S.max_pick = len(S.tombola)-1
@@ -523,7 +523,7 @@ class UrlProducer:
 				continue
 			index = random.randint(0, S.max_pick)
 			clip=Clip(S.tombola[index])
-			print(clip)
+			print(f'QUEUE\t\t: {clip}')
 			await q.put(clip)
 	
 	def createdb_if_needed(S):
@@ -557,14 +557,14 @@ class UrlProducer:
 		con.close()
 
 async def assess(clip):
-	print(f'ASSESS: {clip}')
-	if clip.stint <  20.0:
-		#print( 'bad')
-		store_bad_status(clip)
+	print(f'ASSESS\t\t:  {clip} ',end='')
+	if clip.did_run:
+		print('good')
+		store_good_status(clip)
 		return
-	print('good')
-	store_good_status(clip)
-	
+	print( 'bad')
+	store_bad_status(clip)
+
 def store_good_status(clip:Clip)->None:
 	# tag , url , good, width , heigh , time
 	now     = time.time()
